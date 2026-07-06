@@ -1,0 +1,5 @@
+textual>=8.2
+psutil>=7.0
+pyobjc-framework-Cocoa>=12.2
+rumps>=0.4
+Pillow>=12.0

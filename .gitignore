@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# PyInstaller build output — rebuildable from source, not source itself
+build/
+dist/
+
+# Local runtime state, never meant to be shared
+*.log
