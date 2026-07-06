@@ -18,6 +18,41 @@ Built for a Mac mini running always-on AI/dev tooling, where a runaway process o
 
 ![Dashboard window](docs/screenshots/dashboard-window.png)
 
+## Telegram integration
+
+The hourly heartbeat isn't a text message — it's a rendered snapshot of the dashboard itself, sent as a photo, so a glance at your phone shows the same cards you'd see on the Mac.
+
+**What arrives in Telegram every hour:**
+
+![Telegram heartbeat](docs/screenshots/telegram-heartbeat.jpg)
+
+**How it works, end to end:**
+
+```mermaid
+flowchart LR
+    subgraph "Every hour, via launchd — independent of the app"
+        A[launchd fires\ncom.macssd.watcher] --> B[watcher.py run_once]
+        B --> C[collectors\nCPU / RAM / drives / thermal]
+        C --> D[severity.py\nok / warn / critical]
+        D --> E[dashboard_image.py\nrenders a PNG snapshot]
+        E --> F[telegram.py send_photo]
+        F --> G((Telegram chat))
+        D -->|critical CPU/RAM/storage| H[actions.py\nthrottle top process]
+        H --> F
+        D -->|critical drive temp| I[Send warning,\nwait 5 minutes]
+        I --> J{Reply received?}
+        J -->|No| K[sudo shutdown -h now]
+        J -->|Yes| L[Stand down, log it]
+    end
+
+    subgraph "Whenever you click the menu bar"
+        M[menubar.py] --> C
+        C --> N[gui.py popover]
+    end
+```
+
+Both paths — the always-on hourly watcher and the on-demand menu bar dashboard — read from the exact same collectors and severity thresholds, so they never disagree about what counts as a problem. The watcher has no dependency on the GUI app at all: it runs as long as the Mac is powered on and logged in, locked screen or not.
+
 ## Features
 
 - **Live system monitoring** — CPU, RAM, and per-drive capacity/throughput, refreshed every few seconds.
