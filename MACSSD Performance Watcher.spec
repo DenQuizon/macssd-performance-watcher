@@ -10,7 +10,11 @@ hiddenimports += collect_submodules('AppKit')
 
 a = Analysis(
     ['pyinstaller_macssd_launcher.py'],
-    pathex=['/Users/denquizon/MAC-SSD Software Projects/mac-system-intelligence-monitor/.venv/lib/python3.13/site-packages'],
+    # No pathex needed — build with the project's own venv's pyinstaller
+    # (./.venv/bin/pyinstaller), which already has its site-packages on
+    # sys.path. A hardcoded absolute path here just goes stale the next
+    # time the project moves.
+    pathex=[],
     binaries=[],
     datas=[],
     hiddenimports=hiddenimports,
