@@ -9,7 +9,7 @@ import sys
 from macssd.collectors.health import DriveHealth
 from macssd.collectors.system import SystemStats
 from macssd.collectors.thermal import ThermalStatus
-from macssd.menubar import build_compact_temp_segments, tooltip_text, build_segments
+from macssd.menubar import build_compact_temp_segments, tooltip_text, build_segments, temp_items
 from macssd import menubar_render as r
 from macssd.storage import StorageUsage
 
@@ -61,6 +61,19 @@ try:
     assert "CPU 97°C" in texts and "Mac serious" in texts
     assert build_compact_temp_segments(drives, therm, {"show_temps": False}) == []
 
+    # Temperatures become drawable items drawn inside the image, same baseline.
+    items = temp_items(build_compact_temp_segments(drives, therm, settings, 50.0))
+    assert [(i.label, i.value) for i in items] == [("INT", "39°"), ("EXT", "38°")], items
+    with_t = r.build_compact_model(stats, storage, temps=items)
+    lp = r.layout(with_t)
+    assert lp["width"] > r.layout(m)["width"] and len(lp["temps"]) == 2
+    assert lp["temps"][0][1] < lp["temps"][1][1], "INT must sit left of EXT"
+    trep = r.render_bitmap(with_t)
+    t0 = lp["temps"][0][1]
+    n = sum(1 for x in range(int(t0 * 2), trep.pixelsWide()) for y in range(trep.pixelsHigh())
+            if trep.colorAtX_y_(x, y).alphaComponent() > 0.3)
+    assert n > 100, "temperature text is blank"
+
     # Tooltip carries every reading.
     tip = tooltip_text(build_segments(drives, therm, settings, 50.0), m)
     assert "CPU 27%" in tip and "RAM 81%" in tip and "221.00 GB used, 24.00 GB free" in tip
@@ -69,7 +82,7 @@ try:
     # Drawing: layout is sane and the bitmap actually has ink in all three blocks.
     pos = r.layout(m)
     assert pos["used_x"] < pos["ring_x"] < pos["free_x"] < pos["free_val_x"] < pos["ram_x"] < pos["cpu_x"] < pos["width"]
-    assert pos["width"] < 500, f"menu bar graphic too wide: {pos['width']}"
+    assert pos["width"] < 620, f"menu bar graphic too wide: {pos['width']}"
     rep = r.render_bitmap(m)
     w, h = rep.pixelsWide(), rep.pixelsHigh()
     assert (w, h) == (int(pos["width"] * 2), int(r.IMAGE_HEIGHT * 2))

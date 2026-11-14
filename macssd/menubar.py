@@ -160,6 +160,18 @@ def build_compact_temp_segments(
     return segs
 
 
+def temp_items(segments: list[TitleSegment]) -> tuple:
+    """Turn compact temperature segments ("INT 42°") into drawable items."""
+    items = []
+    for seg in segments:
+        text = seg.text.strip()
+        if not text:
+            continue
+        label, _, value = text.partition(" ")
+        items.append(menubar_render.TempItem(label, value, seg.severity))
+    return tuple(items)
+
+
 def tooltip_text(segments: list[TitleSegment], model: menubar_render.CompactModel | None = None) -> str:
     """One reading per line, for hovering over the (deliberately compact)
     menu bar title to see everything spelled out."""
@@ -316,7 +328,9 @@ class MenuBarApp(rumps.App):
                 health_results, therm, self.settings, cpu_temp_c
             )
             self._refresh_storage_async()
-            self._model = menubar_render.build_compact_model(system.read(), self._storage)
+            self._model = menubar_render.build_compact_model(
+                system.read(), self._storage, temps=temp_items(self._compact_segments)
+            )
             self._apply_title()
         except Exception:  # noqa: BLE001
             print("menubar refresh skipped, full error below:")
@@ -354,9 +368,8 @@ class MenuBarApp(rumps.App):
             item = self._nsapp.nsstatusitem
             button = item.button()
             button.setImage_(menubar_render.render_image(self._model, blink_off=not self._blink_on))
-            button.setImagePosition_(2)  # NSImageLeft: graphics first, temps after
-            attr = _attributed_title(self._compact_segments, blink_off=not self._blink_on)
-            item.setAttributedTitle_(attr)
+            button.setImagePosition_(1)  # NSImageOnly: temps are drawn inside the image
+            button.setTitle_("")
             button.setToolTip_(tooltip_text(self._last_segments, self._model))
         except Exception:  # noqa: BLE001
             # Fall back to plain text if PyObjC drawing/colouring isn't available.

@@ -78,10 +78,18 @@ class RingMetric:
 
 
 @dataclass(frozen=True)
+class TempItem:
+    label: str      # "INT", "EXT", "CPU", "Mac"
+    value: str      # "42°"
+    severity: str   # "neutral" | "warn" | "critical"
+
+
+@dataclass(frozen=True)
 class CompactModel:
     cpu: BarMetric
     ram: BarMetric
     ssd: RingMetric
+    temps: tuple = ()  # tuple[TempItem, ...], drawn on the same baseline as the rest
 
     @property
     def has_critical(self) -> bool:
@@ -96,6 +104,7 @@ def build_compact_model(
     stats: SystemStats | None,
     storage: dict[str, StorageUsage] | None,
     drive_name: str = INTERNAL_DRIVE,
+    temps: tuple = (),
 ) -> CompactModel:
     cpu_pct = _clamp_percent(stats.cpu_percent) if stats else 0.0
     ram_pct = _clamp_percent(stats.ram_percent) if stats else 0.0
@@ -115,17 +124,18 @@ def build_compact_model(
         cpu=BarMetric("CPU", cpu_pct, usage_severity(cpu_pct, CPU_WARN, CPU_CRIT)),
         ram=BarMetric("RAM", ram_pct, usage_severity(ram_pct, RAM_WARN, RAM_CRIT)),
         ssd=ring,
+        temps=tuple(temps),
     )
 
 
 # --- drawing -----------------------------------------------------------------
 
 IMAGE_HEIGHT = 22.0
-_RING_SIZE = 19.0
+_RING_SIZE = 20.0
 _RING_LINE = 3.4
 _BAR_W = 8.0
-_BAR_H = 20.0
-TEXT_SIZE = 15.0  # shared with the temperature title text in menubar.py
+_BAR_H = 21.0
+TEXT_SIZE = 16.0  # shared with the temperature title text in menubar.py
 _LABEL_SIZE = TEXT_SIZE
 _VALUE_SIZE = TEXT_SIZE
 _UNIT_SIZE = 12.0
@@ -184,7 +194,7 @@ def _y_for(attr) -> float:
     return (IMAGE_HEIGHT - attr.size().height) / 2
 
 
-def layout(model: CompactModel) -> dict[str, float]:
+def layout(model: CompactModel) -> dict:
     """x positions and total width, measured with the real fonts."""
     label, value, unit = _fonts()
     pos: dict[str, float] = {}
@@ -211,7 +221,16 @@ def layout(model: CompactModel) -> dict[str, float]:
         x += _BAR_W + _SMALL_GAP
         pos[f"{key}_val_x"] = x
         x += _w("99%", value) + _GAP
-    pos["width"] = x - _GAP + 1
+    x -= _GAP
+    pos["temps"] = []
+    for item in model.temps:
+        x += _GAP + 2.0
+        label_x = x
+        x += _w(item.label, label) + _SMALL_GAP
+        value_x = x
+        x += _w(item.value, value)
+        pos["temps"].append((item, label_x, value_x))
+    pos["width"] = x + 1
     return pos
 
 
@@ -296,6 +315,22 @@ def _draw_bar_block(x: float, bar_x: float, val_x: float, key: str, metric: BarM
     _draw_text(val_x, metric.text, value, text_color)
 
 
+def _draw_temp(item: TempItem, label_x: float, value_x: float, blink_off: bool) -> None:
+    """A labelled temperature ("INT 42°") on the shared baseline. Critical is
+    red and blinks; warn is orange; normal uses the plain menu bar colour."""
+    from AppKit import NSColor
+
+    label, value, _ = _fonts()
+    if item.severity == "critical":
+        colour = NSColor.labelColor() if blink_off else NSColor.systemRedColor()
+    elif item.severity == "warn":
+        colour = NSColor.systemOrangeColor()
+    else:
+        colour = NSColor.labelColor()
+    _draw_text(label_x, item.label, label, NSColor.secondaryLabelColor() if item.severity == "neutral" else colour)
+    _draw_text(value_x, item.value, value, colour)
+
+
 def render_image(model: CompactModel, blink_off: bool = False):
     """Draw the model into a non-template NSImage (dynamic colours).
 
@@ -318,6 +353,8 @@ def render_image(model: CompactModel, blink_off: bool = False):
             _draw_gb(pos["free_val_x"], model.ssd.free_text, _label_color())
             _draw_bar_block(pos["ram_x"], pos["ram_bar_x"], pos["ram_val_x"], "ram", model.ram, blink_off)
             _draw_bar_block(pos["cpu_x"], pos["cpu_bar_x"], pos["cpu_val_x"], "cpu", model.cpu, blink_off)
+            for item, label_x, value_x in pos["temps"]:
+                _draw_temp(item, label_x, value_x, blink_off)
         except Exception:  # noqa: BLE001 - never let a draw failure crash the menu bar
             return False
         return True
