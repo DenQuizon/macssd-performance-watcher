@@ -8,13 +8,13 @@ Two layers, so the logic is testable without a screen:
   Colours come from dynamic system colours, so the same image looks right on
   light and dark menu bars. Everything is drawn from scratch (no copied art).
 
-Layout, left to right. Every item is ONE rounded pill in its own muted
-colour, with soft grey-white text (vertical bars fill from the bottom):
+Layout, left to right. Every item is ONE black rounded pill; the text, bar
+and ring use that item's own washed-out colour (vertical bars fill from the bottom):
 
     [USED 176.89 (ring) FREE 317.44 GB] [RAM |#| 63%] [CPU |#| 55%] [INT 42°] [EXT 31°]
-        storage purple                    RAM green      CPU mustard    INT blue  EXT pink
+        lavender                          sage green     mustard        soft blue soft pink
 
-Only a *critical* reading turns its pill red, and it blinks (the app
+Only a *critical* reading turns its pill red (soft white text), and it blinks (the app
 alternates ``blink_off``); warn-level readings keep their normal colour.
 """
 
@@ -144,16 +144,17 @@ _BAR_W = 7.0
 _BAR_H = 14.0
 _GAP = 5.0
 
-# (start, end) per item: washed-out mid-tones so soft grey-white text stays
-# readable and the pills are still easy to tell apart.
-GRADIENTS = {
-    "disk": ((0.49, 0.41, 0.71), (0.58, 0.48, 0.78)),   # purple
-    "ram": ((0.33, 0.57, 0.42), (0.41, 0.64, 0.50)),    # green
-    "cpu": ((0.74, 0.61, 0.26), (0.79, 0.57, 0.28)),    # mustard yellow
-    "int": ((0.36, 0.50, 0.74), (0.44, 0.58, 0.80)),    # blue
-    "ext": ((0.72, 0.42, 0.57), (0.79, 0.50, 0.65)),    # pink
-    "gray": ((0.45, 0.45, 0.50), (0.55, 0.55, 0.61)),   # anything else (Mac thermal ...)
+# Washed-out ink colour per item, used for the text, bar and ring on a black
+# pill. Pastel enough to be soft, different enough to tell items apart.
+INK = {
+    "disk": (0.72, 0.64, 0.92),   # lavender   - storage
+    "ram": (0.58, 0.80, 0.65),    # sage green - RAM
+    "cpu": (0.90, 0.77, 0.42),    # mustard    - CPU
+    "int": (0.57, 0.72, 0.94),    # soft blue  - internal SSD temp
+    "ext": (0.92, 0.64, 0.78),    # soft pink  - external SSD temp
+    "gray": (0.70, 0.70, 0.74),   # anything else (Mac thermal ...)
 }
+_PILL_BLACK = (0.05, 0.05, 0.06)
 _TEMP_KEYS = {"INT": "int", "EXT": "ext", "CPU": "cpu"}
 
 
@@ -255,24 +256,23 @@ def layout(model: CompactModel) -> dict:
     return pos
 
 
-def _pill_colors(key: str, severity: str, blink_off: bool):
-    from AppKit import NSColor
-
+def _ink(key: str, severity: str, blink_off: bool):
+    """Text/bar/ring colour: the item's washed colour, or soft white on the
+    red pill while a critical reading is 'on'."""
     if severity == "critical" and not blink_off:
-        red = NSColor.systemRedColor()
-        return red, red
-    start, end = GRADIENTS[key]
-    return _rgb(start), _rgb(end)
+        return _text_color()
+    return _rgb(INK[key])
 
 
 def _draw_pill(key: str, x: float, width: float, severity: str, blink_off: bool) -> None:
-    from AppKit import NSBezierPath, NSGradient
+    from AppKit import NSBezierPath, NSColor
     from Foundation import NSMakeRect
 
-    c0, c1 = _pill_colors(key, severity, blink_off)
+    critical_on = severity == "critical" and not blink_off
+    fill = NSColor.systemRedColor() if critical_on else _rgb(_PILL_BLACK)
     rect = NSMakeRect(x, (IMAGE_HEIGHT - _PILL_H) / 2, width, _PILL_H)
-    path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(rect, _PILL_RADIUS, _PILL_RADIUS)
-    NSGradient.alloc().initWithStartingColor_endingColor_(c0, c1).drawInBezierPath_angle_(path, 0.0)
+    fill.setFill()
+    NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(rect, _PILL_RADIUS, _PILL_RADIUS).fill()
 
 
 def _draw_text(x: float, text: str, font, color) -> None:
@@ -280,15 +280,15 @@ def _draw_text(x: float, text: str, font, color) -> None:
     a.drawAtPoint_((x, _y_for(a)))
 
 
-def _draw_gb(x: float, text: str, with_unit: bool) -> None:
+def _draw_gb(x: float, text: str, with_unit: bool, ink) -> None:
     _, value, unit = _fonts()
     number, u = _split_gb(text)
-    _draw_text(x, number, value, _text_color())
+    _draw_text(x, number, value, ink)
     if with_unit:
-        _draw_text(x + _w(number, value) + 2.0, u, unit, _text_color(0.85))
+        _draw_text(x + _w(number, value) + 2.0, u, unit, ink.colorWithAlphaComponent_(0.8))
 
 
-def _draw_ring(x: float, ssd: RingMetric) -> None:
+def _draw_ring(x: float, ssd: RingMetric, ink) -> None:
     from AppKit import NSBezierPath
     from Foundation import NSMakePoint
 
@@ -298,7 +298,7 @@ def _draw_ring(x: float, ssd: RingMetric) -> None:
     track = NSBezierPath.bezierPath()
     track.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_(centre, radius, 0, 360)
     track.setLineWidth_(_RING_LINE)
-    _rgb((1, 1, 1), 0.25).setStroke()
+    ink.colorWithAlphaComponent_(0.28).setStroke()
     track.stroke()
 
     if ssd.available and ssd.fraction > 0:
@@ -310,36 +310,36 @@ def _draw_ring(x: float, ssd: RingMetric) -> None:
         )
         arc.setLineWidth_(_RING_LINE)
         arc.setLineCapStyle_(1)  # round
-        _text_color().setStroke()
+        ink.setStroke()
         arc.stroke()
 
 
-def _draw_bar_block(x: float, bar_x: float, val_x: float, metric: BarMetric) -> None:
+def _draw_bar_block(x: float, bar_x: float, val_x: float, metric: BarMetric, ink) -> None:
     from AppKit import NSBezierPath
     from Foundation import NSMakeRect
 
     label, value, _ = _fonts()
-    _draw_text(x, metric.label, label, _text_color())
+    _draw_text(x, metric.label, label, ink)
 
     bar_y = (IMAGE_HEIGHT - _BAR_H) / 2
-    _rgb((1, 1, 1), 0.25).setFill()
+    ink.colorWithAlphaComponent_(0.28).setFill()
     NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
         NSMakeRect(bar_x, bar_y, _BAR_W, _BAR_H), 3.0, 3.0
     ).fill()
     fill_h = _BAR_H * metric.fraction
     if fill_h > 0:
         fill_h = max(fill_h, _BAR_W)  # keep the capsule shape for tiny values
-        _text_color().setFill()
+        ink.setFill()
         NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
             NSMakeRect(bar_x, bar_y, _BAR_W, fill_h), 3.0, 3.0
         ).fill()
-    _draw_text(val_x, metric.text, value, _text_color())
+    _draw_text(val_x, metric.text, value, ink)
 
 
-def _draw_temp(item: TempItem, label_x: float, value_x: float) -> None:
+def _draw_temp(item: TempItem, label_x: float, value_x: float, ink) -> None:
     label, value, _ = _fonts()
-    _draw_text(label_x, item.label, label, _text_color(0.85))
-    _draw_text(value_x, item.value, value, _text_color())
+    _draw_text(label_x, item.label, label, ink.colorWithAlphaComponent_(0.8))
+    _draw_text(value_x, item.value, value, ink)
 
 
 def render_image(model: CompactModel, blink_off: bool = False):
@@ -358,15 +358,19 @@ def render_image(model: CompactModel, blink_off: bool = False):
         try:
             for key, x0, width, severity in pos["pills"]:
                 _draw_pill(key, x0, width, severity, blink_off)
-            _draw_text(pos["used_x"], "USED", label, _text_color(0.85))
-            _draw_gb(pos["used_val_x"], model.ssd.used_text, with_unit=False)
-            _draw_ring(pos["ring_x"], model.ssd)
-            _draw_text(pos["free_x"], "FREE", label, _text_color(0.85))
-            _draw_gb(pos["free_val_x"], model.ssd.free_text, with_unit=True)
-            _draw_bar_block(pos["ram_x"], pos["ram_bar_x"], pos["ram_val_x"], model.ram)
-            _draw_bar_block(pos["cpu_x"], pos["cpu_bar_x"], pos["cpu_val_x"], model.cpu)
-            for item, label_x, value_x in pos["temps"]:
-                _draw_temp(item, label_x, value_x)
+            disk = _ink("disk", model.ssd.severity, blink_off)
+            _draw_text(pos["used_x"], "USED", label, disk.colorWithAlphaComponent_(0.8))
+            _draw_gb(pos["used_val_x"], model.ssd.used_text, False, disk)
+            _draw_ring(pos["ring_x"], model.ssd, disk)
+            _draw_text(pos["free_x"], "FREE", label, disk.colorWithAlphaComponent_(0.8))
+            _draw_gb(pos["free_val_x"], model.ssd.free_text, True, disk)
+            for key, metric in (("ram", model.ram), ("cpu", model.cpu)):
+                _draw_bar_block(
+                    pos[f"{key}_x"], pos[f"{key}_bar_x"], pos[f"{key}_val_x"], metric,
+                    _ink(key, metric.severity, blink_off),
+                )
+            for (item, label_x, value_x), (pkey, _x0, _w0, psev) in zip(pos["temps"], pos["pills"][-len(pos["temps"]):] if pos["temps"] else []):
+                _draw_temp(item, label_x, value_x, _ink(pkey, psev, blink_off))
         except Exception:  # noqa: BLE001 - never let a draw failure crash the menu bar
             return False
         return True
