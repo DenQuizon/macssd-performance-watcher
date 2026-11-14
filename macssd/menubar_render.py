@@ -12,8 +12,9 @@ Layout, left to right (vertical bars fill from the bottom):
 
     USED 176.89 GB  (ring)  FREE 317.44 GB   RAM |#| 63%   CPU |#| 30%
 
-Each metric has its own gradient colour (disk purple-pink, RAM green-teal,
-CPU amber-orange). Only a *critical* reading turns red, and it blinks (the app
+Each label sits on its own coloured badge with white text (storage purple,
+RAM green, CPU yellow, INT blue, EXT pink); numbers use the plain menu bar
+colour. Only a *critical* reading turns its badge red, and it blinks (the app
 alternates ``blink_off``); warn-level readings keep their normal colour.
 """
 
@@ -134,7 +135,7 @@ IMAGE_HEIGHT = 22.0
 _RING_SIZE = 20.0
 _RING_LINE = 3.4
 _BAR_W = 8.0
-_BAR_H = 21.0
+_BAR_H = 20.0
 TEXT_SIZE = 16.0  # shared with the temperature title text in menubar.py
 _LABEL_SIZE = TEXT_SIZE
 _VALUE_SIZE = TEXT_SIZE
@@ -142,12 +143,18 @@ _UNIT_SIZE = 12.0
 _GAP = 7.0
 _SMALL_GAP = 4.0
 
+
 # (start, end) RGB per metric. Chosen to read on both light and dark menu bars.
 GRADIENTS = {
-    "disk": ((0.62, 0.42, 1.00), (1.00, 0.42, 0.72)),   # purple -> pink
-    "ram": ((0.16, 0.85, 0.46), (0.10, 0.72, 0.85)),    # green -> teal
-    "cpu": ((1.00, 0.80, 0.05), (1.00, 0.52, 0.08)),    # amber -> orange
+    "disk": ((0.52, 0.34, 0.95), (0.74, 0.40, 0.98)),   # purple
+    "ram": ((0.16, 0.68, 0.30), (0.28, 0.80, 0.42)),    # green
+    "cpu": ((0.96, 0.72, 0.02), (0.93, 0.56, 0.02)),    # yellow-amber (deep enough for white text)
+    "int": ((0.16, 0.42, 0.98), (0.30, 0.60, 1.00)),    # blue  - internal SSD temperature
+    "ext": ((0.88, 0.28, 0.62), (0.96, 0.44, 0.76)),    # pink  - external SSD temperature
+    "gray": ((0.45, 0.45, 0.50), (0.58, 0.58, 0.64)),   # anything else (Mac thermal ...)
 }
+_PAD = 5.0        # horizontal padding inside a badge
+_BADGE_H = 20.0
 
 
 def _rgb(c):
@@ -200,23 +207,26 @@ def layout(model: CompactModel) -> dict:
     pos: dict[str, float] = {}
     x = 1.0
 
+    def badge_w(text: str) -> float:
+        return _w(text, label) + 2 * _PAD
+
     def gb_width(text: str, with_unit: bool = True) -> float:
         n, u = _split_gb(text)
         return _w(n, value) + ((2.0 + _w(u, unit)) if with_unit else 0.0)
 
     pos["used_x"] = x
-    x += _w("USED", label) + _SMALL_GAP
+    x += badge_w("USED") + _SMALL_GAP
     pos["used_val_x"] = x
     x += gb_width(model.ssd.used_text, False) + _SMALL_GAP + 1
     pos["ring_x"] = x
     x += _RING_SIZE + _SMALL_GAP + 1
     pos["free_x"] = x
-    x += _w("FREE", label) + _SMALL_GAP
+    x += badge_w("FREE") + _SMALL_GAP
     pos["free_val_x"] = x
     x += gb_width(model.ssd.free_text) + _GAP
     for key in ("ram", "cpu"):
         pos[f"{key}_x"] = x
-        x += _w("RAM", label) + _SMALL_GAP
+        x += badge_w("RAM" if key == "ram" else "CPU") + _SMALL_GAP
         pos[f"{key}_bar_x"] = x
         x += _BAR_W + _SMALL_GAP
         pos[f"{key}_val_x"] = x
@@ -226,7 +236,7 @@ def layout(model: CompactModel) -> dict:
     for item in model.temps:
         x += _GAP + 2.0
         label_x = x
-        x += _w(item.label, label) + _SMALL_GAP
+        x += badge_w(item.label) + _SMALL_GAP
         value_x = x
         x += _w(item.value, value)
         pos["temps"].append((item, label_x, value_x))
@@ -248,6 +258,19 @@ def _metric_colors(key: str, severity: str, blink_off: bool):
 def _draw_text(x: float, text: str, font, color) -> None:
     a = _attr(text, font, color)
     a.drawAtPoint_((x, _y_for(a)))
+
+
+def _draw_badge(x: float, text: str, key: str, severity: str, blink_off: bool) -> None:
+    """Coloured rounded badge with white text. Critical -> red, blinking."""
+    from AppKit import NSBezierPath, NSColor, NSGradient
+    from Foundation import NSMakeRect
+
+    label, _, _ = _fonts()
+    c0, c1 = _metric_colors(key, severity, blink_off)
+    rect = NSMakeRect(x, (IMAGE_HEIGHT - _BADGE_H) / 2, _w(text, label) + 2 * _PAD, _BADGE_H)
+    path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(rect, 6.0, 6.0)
+    NSGradient.alloc().initWithStartingColor_endingColor_(c0, c1).drawInBezierPath_angle_(path, 0.0)
+    _draw_text(x + _PAD, text, label, NSColor.whiteColor())
 
 
 def _draw_gb(x: float, text: str, color, with_unit: bool = True) -> None:
@@ -296,7 +319,7 @@ def _draw_bar_block(x: float, bar_x: float, val_x: float, key: str, metric: BarM
 
     label, value, _ = _fonts()
     c0, c1 = _metric_colors(key, metric.severity, blink_off)
-    _draw_text(x, metric.label, label, c0)
+    _draw_badge(x, metric.label, key, metric.severity, blink_off)
 
     bar_y = (IMAGE_HEIGHT - _BAR_H) / 2
     NSColor.labelColor().colorWithAlphaComponent_(0.22).setFill()
@@ -311,24 +334,21 @@ def _draw_bar_block(x: float, bar_x: float, val_x: float, key: str, metric: BarM
         )
         NSGradient.alloc().initWithStartingColor_endingColor_(c0, c1).drawInBezierPath_angle_(path, 90.0)
 
-    text_color = c0 if metric.severity == "critical" and not blink_off else NSColor.labelColor()
-    _draw_text(val_x, metric.text, value, text_color)
+    _draw_text(val_x, metric.text, value, NSColor.labelColor())
+
+
+_TEMP_KEYS = {"INT": "int", "EXT": "ext", "CPU": "cpu"}
 
 
 def _draw_temp(item: TempItem, label_x: float, value_x: float, blink_off: bool) -> None:
-    """A labelled temperature ("INT 42°") on the shared baseline. Critical is
-    red and blinks; warn is orange; normal uses the plain menu bar colour."""
+    """A labelled temperature: coloured badge (INT blue, EXT pink, ...) plus the
+    value in plain text. Critical turns the badge red and blinks."""
     from AppKit import NSColor
 
-    label, value, _ = _fonts()
-    if item.severity == "critical":
-        colour = NSColor.labelColor() if blink_off else NSColor.systemRedColor()
-    elif item.severity == "warn":
-        colour = NSColor.systemOrangeColor()
-    else:
-        colour = NSColor.labelColor()
-    _draw_text(label_x, item.label, label, NSColor.secondaryLabelColor() if item.severity == "neutral" else colour)
-    _draw_text(value_x, item.value, value, colour)
+    _, value, _ = _fonts()
+    key = _TEMP_KEYS.get(item.label, "gray")
+    _draw_badge(label_x, item.label, key, item.severity, blink_off)
+    _draw_text(value_x, item.value, value, NSColor.labelColor())
 
 
 def render_image(model: CompactModel, blink_off: bool = False):
@@ -345,11 +365,10 @@ def render_image(model: CompactModel, blink_off: bool = False):
 
     def handler(_rect) -> bool:
         try:
-            c_disk0, _c = _metric_colors("disk", model.ssd.severity, blink_off)
-            _draw_text(pos["used_x"], "USED", label, c_disk0)
+            _draw_badge(pos["used_x"], "USED", "disk", model.ssd.severity, blink_off)
             _draw_gb(pos["used_val_x"], model.ssd.used_text, _label_color(), with_unit=False)
             _draw_ring(pos["ring_x"], model.ssd, blink_off)
-            _draw_text(pos["free_x"], "FREE", label, c_disk0)
+            _draw_badge(pos["free_x"], "FREE", "disk", model.ssd.severity, blink_off)
             _draw_gb(pos["free_val_x"], model.ssd.free_text, _label_color())
             _draw_bar_block(pos["ram_x"], pos["ram_bar_x"], pos["ram_val_x"], "ram", model.ram, blink_off)
             _draw_bar_block(pos["cpu_x"], pos["cpu_bar_x"], pos["cpu_val_x"], "cpu", model.cpu, blink_off)
