@@ -69,7 +69,7 @@ try:
     # Drawing: layout is sane and the bitmap actually has ink in all three blocks.
     pos = r.layout(m)
     assert pos["used_x"] < pos["ring_x"] < pos["free_x"] < pos["free_val_x"] < pos["ram_x"] < pos["cpu_x"] < pos["width"]
-    assert pos["width"] < 360, f"menu bar graphic too wide: {pos['width']}"
+    assert pos["width"] < 420, f"menu bar graphic too wide: {pos['width']}"
     rep = r.render_bitmap(m)
     w, h = rep.pixelsWide(), rep.pixelsHigh()
     assert (w, h) == (int(pos["width"] * 2), int(r.IMAGE_HEIGHT * 2))

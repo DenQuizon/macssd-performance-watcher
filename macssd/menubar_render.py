@@ -121,14 +121,14 @@ def build_compact_model(
 # --- drawing -----------------------------------------------------------------
 
 IMAGE_HEIGHT = 22.0
-_RING_SIZE = 17.0
+_RING_SIZE = 18.0
 _RING_LINE = 3.4
 _BAR_W = 8.0
 _BAR_H = 19.0
-_LABEL_SIZE = 10.5
-_VALUE_SIZE = 12.0
-_UNIT_SIZE = 9.5
-_GAP = 8.0
+_LABEL_SIZE = 13.0
+_VALUE_SIZE = 13.0
+_UNIT_SIZE = 10.5
+_GAP = 7.0
 _SMALL_GAP = 4.0
 
 # (start, end) RGB per metric. Chosen to read on both light and dark menu bars.
