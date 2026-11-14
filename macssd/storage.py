@@ -24,13 +24,42 @@ class StorageUsage:
     total_gb: float = 0.0
 
 
+def _volume_capacity(mountpoint: str) -> tuple[float, float] | None:
+    """(total_gb, available_gb) the way System Settings > Storage reports it.
+
+    "Available for important usage" counts purgeable space (local snapshots,
+    caches macOS can reclaim) as free. psutil/df only see raw free blocks, so
+    they report far more "used" than Settings does.
+    """
+    try:
+        from Foundation import NSURL
+
+        url = NSURL.fileURLWithPath_(mountpoint)
+        keys = ["NSURLVolumeTotalCapacityKey", "NSURLVolumeAvailableCapacityForImportantUsageKey"]
+        values, _err = url.resourceValuesForKeys_error_(keys, None)
+        if not values:
+            return None
+        total = float(values["NSURLVolumeTotalCapacityKey"])
+        avail = float(values["NSURLVolumeAvailableCapacityForImportantUsageKey"])
+    except Exception:  # noqa: BLE001 - fall back to psutil below
+        return None
+    if total <= 0 or avail < 0:
+        return None
+    return total / 1_000_000_000, min(avail, total) / 1_000_000_000
+
+
 def read_storage() -> dict[str, StorageUsage]:
-    """Used/total GB per drive."""
+    """Used/total GB per drive (used = total - available, as in System Settings)."""
     result = {}
     for drive in discover_drives():
         name, mountpoint = drive.name, drive.mountpoint
         if mountpoint is None:
             result[name] = StorageUsage(False)
+            continue
+        cap = _volume_capacity(mountpoint)
+        if cap is not None:
+            total_gb, avail_gb = cap
+            result[name] = StorageUsage(True, total_gb - avail_gb, total_gb)
             continue
         try:
             usage = psutil.disk_usage(mountpoint)

@@ -24,14 +24,14 @@ try:
     m = r.build_compact_model(stats, storage)
     assert m.cpu.text == "27%" and m.ram.text == "81%", (m.cpu.text, m.ram.text)
     assert m.cpu.severity == "ok" and m.ram.severity == "warn", "81% RAM should warn"
-    assert m.ssd.used_text == "221 GB used" and m.ssd.free_text == "24 GB free"
+    assert m.ssd.used_text == "221.00 GB" and m.ssd.free_text == "24.00 GB"
     assert abs(m.ssd.fraction - 221 / 245) < 1e-9
     assert m.ssd.severity in ("warn", "critical")
 
     # Clamping and missing data never crash.
     wild = r.build_compact_model(SystemStats(180.0, 1, 1, -5.0, 0, 0, 0), {})
     assert wild.cpu.percent == 100.0 and wild.ram.percent == 0.0
-    assert wild.ssd.available is False and wild.ssd.used_text == "-- GB used"
+    assert wild.ssd.available is False and wild.ssd.used_text == "-- GB"
     none = r.build_compact_model(None, None)
     assert none.cpu.text == "0%" and none.ssd.fraction == 0.0
     unmounted = r.build_compact_model(stats, {"Internal SSD": StorageUsage(False)})
@@ -50,24 +50,26 @@ try:
         "External SSD": DriveHealth("External SSD", True, "ok", 38, 70, 85, 0, 100, 0, "ok"),
     }
     segs = build_compact_temp_segments(drives, therm, settings, 50.0)
-    assert [s.text for s in segs] == ["39°/38°"], [s.text for s in segs]
+    assert [s.text for s in segs] == ["INT 39°", "  ", "EXT 38°"], [s.text for s in segs]
     hot = dict(drives)
     hot["External SSD"] = DriveHealth("External SSD", True, "critical", 92, 70, 85, 0, 100, 0, "hot")
     segs = build_compact_temp_segments(hot, ThermalStatus(True, "serious", "x"), settings, 97.0)
-    assert segs[0].severity == "critical" and segs[0].blinkable
+    ext = next(x for x in segs if x.text == "EXT 92°")
+    assert ext.severity == "critical" and ext.blinkable
+    assert next(x for x in segs if x.text == "INT 39°").severity == "neutral"
     texts = "".join(s.text for s in segs)
     assert "CPU 97°C" in texts and "Mac serious" in texts
     assert build_compact_temp_segments(drives, therm, {"show_temps": False}) == []
 
     # Tooltip carries every reading.
     tip = tooltip_text(build_segments(drives, therm, settings, 50.0), m)
-    assert "CPU 27%" in tip and "RAM 81%" in tip and "221 GB used, 24 GB free" in tip
+    assert "CPU 27%" in tip and "RAM 81%" in tip and "221.00 GB used, 24.00 GB free" in tip
     assert "Int 39°C" in tip and "Ext 38°C" in tip
 
     # Drawing: layout is sane and the bitmap actually has ink in all three blocks.
     pos = r.layout(m)
-    assert pos["cpu_x"] < pos["ram_x"] < pos["ssd_x"] < pos["text_x"] < pos["width"]
-    assert pos["width"] < 190, f"menu bar graphic too wide: {pos['width']}"
+    assert pos["used_x"] < pos["ring_x"] < pos["free_x"] < pos["ram_x"] < pos["cpu_x"] < pos["width"]
+    assert pos["width"] < 260, f"menu bar graphic too wide: {pos['width']}"
     rep = r.render_bitmap(m)
     w, h = rep.pixelsWide(), rep.pixelsHigh()
     assert (w, h) == (int(pos["width"] * 2), int(r.IMAGE_HEIGHT * 2))
@@ -80,9 +82,11 @@ try:
                     count += 1
         return count
 
-    assert ink(pos["cpu_x"], pos["ram_x"]) > 40, "CPU block is blank"
-    assert ink(pos["ram_x"], pos["ssd_x"]) > 40, "RAM block is blank"
-    assert ink(pos["ssd_x"], pos["width"]) > 40, "SSD block is blank"
+    assert ink(pos["used_x"], pos["ring_x"]) > 40, "USED text is blank"
+    assert ink(pos["ring_x"], pos["free_x"]) > 40, "ring is blank"
+    assert ink(pos["free_x"], pos["ram_x"]) > 40, "FREE text is blank"
+    assert ink(pos["ram_x"], pos["cpu_x"]) > 40, "RAM block is blank"
+    assert ink(pos["cpu_x"], pos["width"]) > 40, "CPU block is blank"
 
     print("ALL PASS")
 except (AssertionError, StopIteration) as e:

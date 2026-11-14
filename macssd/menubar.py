@@ -133,7 +133,8 @@ def build_compact_temp_segments(
 ) -> list[TitleSegment]:
     """Short temperature text shown beside the CPU/RAM/SSD graphics.
 
-    Always shows the drive temperatures (e.g. "39°/38°"). The CPU temperature
+    Always shows each drive's temperature with its label (e.g. "INT 42°  EXT 31°").
+    The CPU temperature
     and Mac thermal state only appear when they need attention; the full list
     stays in the tooltip and dashboard. Empty when temperatures are hidden.
     """
@@ -141,12 +142,13 @@ def build_compact_temp_segments(
         return []
 
     segs: list[TitleSegment] = []
-    temps = [h for h in health_results.values() if h.available and h.temp_c is not None]
-    if temps:
-        order = {"critical": 2, "warn": 1}
-        worst = max((order.get(h.status, 0) for h in temps), default=0)
-        sev = {2: "critical", 1: "warn", 0: "neutral"}[worst]
-        segs.append(TitleSegment("/".join(f"{h.temp_c}°" for h in temps), sev, blinkable=True))
+    for name, h in health_results.items():
+        if not (h.available and h.temp_c is not None):
+            continue
+        sev = h.status if h.status in ("warn", "critical") else "neutral"
+        if segs:
+            segs.append(TitleSegment("  "))
+        segs.append(TitleSegment(f"{_drive_label(name).upper()} {h.temp_c}°", sev, blinkable=True))
 
     cpu_sev = severity.cpu_temp_severity(cpu_temp_c)
     if cpu_temp_c is not None and cpu_sev in ("warn", "critical"):
@@ -167,8 +169,8 @@ def tooltip_text(segments: list[TitleSegment], model: menubar_render.CompactMode
         lines.append(f"RAM {model.ram.text}")
         if model.ssd.available:
             lines.append(
-                f"Internal SSD {model.ssd.used_gb:.0f} GB used, {model.ssd.free_gb:.0f} GB free"
-                f" of {model.ssd.total_gb:.0f} GB"
+                f"Internal SSD {model.ssd.used_gb:.2f} GB used, {model.ssd.free_gb:.2f} GB free"
+                f" of {model.ssd.total_gb:.2f} GB"
             )
         else:
             lines.append("Internal SSD --")

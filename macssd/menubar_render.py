@@ -8,10 +8,9 @@ Two layers, so the logic is testable without a screen:
   Colours come from dynamic system colours, so the same image looks right on
   light and dark menu bars. Everything is drawn from scratch (no copied art).
 
-Layout (each block is two rows, 22pt menu bar height):
+Layout, left to right (vertical bars fill from the bottom):
 
-    CPU  27%   RAM  81%   (ring)  221 GB used
-    [=====---] [=======-]         24 GB free
+    USED 176.89 GB  (ring)  FREE 317.44 GB   R|#| 63%   C|#| 30%
 """
 
 from __future__ import annotations
@@ -67,11 +66,11 @@ class RingMetric:
 
     @property
     def used_text(self) -> str:
-        return f"{self.used_gb:.0f} GB used" if self.available else "-- GB used"
+        return f"{self.used_gb:.2f} GB" if self.available else "-- GB"
 
     @property
     def free_text(self) -> str:
-        return f"{self.free_gb:.0f} GB free" if self.available else "-- GB free"
+        return f"{self.free_gb:.2f} GB" if self.available else "-- GB"
 
 
 @dataclass(frozen=True)
@@ -114,22 +113,22 @@ def build_compact_model(
 # --- drawing -----------------------------------------------------------------
 
 IMAGE_HEIGHT = 18.0
-_BLOCK_GAP = 9.0
-_BAR_WIDTH = 44.0
-_BAR_HEIGHT = 4.0
 _RING_SIZE = 14.0
 _RING_LINE = 2.6
-_LABEL_SIZE = 7.5
-_VALUE_SIZE = 9.0
+_BAR_W = 6.0
+_BAR_H = 16.0
+_CAPTION_SIZE = 6.0
+_VALUE_SIZE = 9.5
+_GAP = 8.0
+_SMALL_GAP = 3.0
 
 
 def _fonts():
-    from AppKit import NSFont, NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular
+    from AppKit import NSFont, NSFontWeightBold, NSFontWeightMedium
 
-    label = NSFont.systemFontOfSize_weight_(_LABEL_SIZE, NSFontWeightBold)
+    caption = NSFont.systemFontOfSize_weight_(_CAPTION_SIZE, NSFontWeightBold)
     value = NSFont.monospacedDigitSystemFontOfSize_weight_(_VALUE_SIZE, NSFontWeightMedium)
-    small = NSFont.monospacedDigitSystemFontOfSize_weight_(_VALUE_SIZE - 0.5, NSFontWeightRegular)
-    return label, value, small
+    return caption, value
 
 
 def _fill_color(severity: str):
@@ -151,55 +150,73 @@ def _attr(text: str, font, color):
     )
 
 
-def layout(model: CompactModel) -> dict[str, float]:
-    """x positions and total width, measured with the real fonts."""
+def _text_w(text: str, font) -> float:
     from AppKit import NSColor
 
-    _, value, small = _fonts()
-    colour = NSColor.labelColor()
-    ssd_text_w = max(
-        _attr(model.ssd.used_text, small, colour).size().width,
-        _attr(model.ssd.free_text, small, colour).size().width,
-    )
-    cpu_x = 1.0
-    ram_x = cpu_x + _BAR_WIDTH + _BLOCK_GAP
-    ssd_x = ram_x + _BAR_WIDTH + _BLOCK_GAP
-    text_x = ssd_x + _RING_SIZE + 4.0
-    width = text_x + ssd_text_w + 1.0
-    return {"cpu_x": cpu_x, "ram_x": ram_x, "ssd_x": ssd_x, "text_x": text_x, "width": width}
+    return _attr(text, font, NSColor.labelColor()).size().width
 
 
-def _draw_bar_block(x: float, metric: BarMetric) -> None:
+def layout(model: CompactModel) -> dict[str, float]:
+    """x positions and total width, measured with the real fonts."""
+    caption, value = _fonts()
+    pos: dict[str, float] = {}
+    x = 1.0
+    pos["used_x"] = x
+    x += max(_text_w(model.ssd.used_text, value), _text_w("USED", caption)) + _SMALL_GAP + 1
+    pos["ring_x"] = x
+    x += _RING_SIZE + _SMALL_GAP + 1
+    pos["free_x"] = x
+    x += max(_text_w(model.ssd.free_text, value), _text_w("FREE", caption)) + _GAP
+    for key, metric in (("ram", model.ram), ("cpu", model.cpu)):
+        pos[f"{key}_x"] = x
+        x += _text_w("W", caption) + _SMALL_GAP          # stacked letters
+        x += _BAR_W + _SMALL_GAP                          # vertical bar
+        x += _text_w("100%", value) + _GAP                # percentage (widest case)
+    pos["width"] = x - _GAP + 1
+    return pos
+
+
+def _draw_caption_value(x: float, caption: str, text: str) -> None:
+    from AppKit import NSColor
+
+    cap_font, val_font = _fonts()
+    _attr(caption, cap_font, NSColor.secondaryLabelColor()).drawAtPoint_((x, IMAGE_HEIGHT - 6.5))
+    _attr(text, val_font, NSColor.labelColor()).drawAtPoint_((x, 0.5))
+
+
+def _draw_vertical_block(x: float, metric: BarMetric) -> None:
     from AppKit import NSBezierPath, NSColor
     from Foundation import NSMakeRect
 
-    label_font, value_font, _ = _fonts()
-    ink = NSColor.labelColor()
-    label = _attr(metric.label, label_font, NSColor.secondaryLabelColor())
-    value = _attr(metric.text, value_font, _fill_color(metric.severity) if metric.severity != "ok" else ink)
+    cap_font, val_font = _fonts()
+    letters = metric.label
+    line_h = 5.2
+    top = IMAGE_HEIGHT / 2 + line_h * len(letters) / 2
+    for i, ch in enumerate(letters):  # stacked label: R / A / M
+        _attr(ch, cap_font, NSColor.secondaryLabelColor()).drawAtPoint_((x, top - line_h * (i + 1) - 0.5))
 
-    top_y = IMAGE_HEIGHT - 9.5
-    label.drawAtPoint_((x, top_y + 0.5))
-    value.drawAtPoint_((x + _BAR_WIDTH - value.size().width, top_y))
-
-    track = NSMakeRect(x, 2.0, _BAR_WIDTH, _BAR_HEIGHT)
+    bar_x = x + _text_w("W", cap_font) + _SMALL_GAP
+    bar_y = (IMAGE_HEIGHT - _BAR_H) / 2
     NSColor.labelColor().colorWithAlphaComponent_(0.22).setFill()
-    NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(track, 2.0, 2.0).fill()
-
-    fill_w = max(_BAR_WIDTH * metric.fraction, 0.0)
-    if fill_w > 0:
-        fill_w = max(fill_w, _BAR_HEIGHT)  # keep the capsule shape for tiny values
+    NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+        NSMakeRect(bar_x, bar_y, _BAR_W, _BAR_H), 2.0, 2.0
+    ).fill()
+    fill_h = _BAR_H * metric.fraction
+    if fill_h > 0:
+        fill_h = max(fill_h, _BAR_W)  # keep the capsule shape for tiny values
         _fill_color(metric.severity).setFill()
         NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            NSMakeRect(x, 2.0, fill_w, _BAR_HEIGHT), 2.0, 2.0
+            NSMakeRect(bar_x, bar_y, _BAR_W, fill_h), 2.0, 2.0
         ).fill()
 
+    text = _attr(metric.text, val_font, _fill_color(metric.severity))
+    text.drawAtPoint_((bar_x + _BAR_W + _SMALL_GAP, (IMAGE_HEIGHT - text.size().height) / 2))
 
-def _draw_ring_block(x: float, text_x: float, ssd: RingMetric) -> None:
+
+def _draw_ring(x: float, ssd: RingMetric) -> None:
     from AppKit import NSBezierPath, NSColor
     from Foundation import NSMakePoint
 
-    _, _, small = _fonts()
     centre = NSMakePoint(x + _RING_SIZE / 2, IMAGE_HEIGHT / 2)
     radius = (_RING_SIZE - _RING_LINE) / 2
 
@@ -212,7 +229,7 @@ def _draw_ring_block(x: float, text_x: float, ssd: RingMetric) -> None:
     if ssd.available and ssd.fraction > 0:
         arc = NSBezierPath.bezierPath()
         start = 90.0
-        end = start - 360.0 * ssd.fraction  # clockwise from 12 o'clock
+        end = start - 360.0 * ssd.fraction  # clockwise from 12 o'clock = share used
         arc.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
             centre, radius, start, end, True
         )
@@ -220,11 +237,6 @@ def _draw_ring_block(x: float, text_x: float, ssd: RingMetric) -> None:
         arc.setLineCapStyle_(1)  # round
         _fill_color(ssd.severity).setStroke()
         arc.stroke()
-
-    used = _attr(ssd.used_text, small, NSColor.labelColor())
-    free = _attr(ssd.free_text, small, NSColor.secondaryLabelColor())
-    used.drawAtPoint_((text_x, IMAGE_HEIGHT - 9.5))
-    free.drawAtPoint_((text_x, 0.5))
 
 
 def render_image(model: CompactModel):
@@ -236,9 +248,11 @@ def render_image(model: CompactModel):
 
     def handler(_rect) -> bool:
         try:
-            _draw_bar_block(pos["cpu_x"], model.cpu)
-            _draw_bar_block(pos["ram_x"], model.ram)
-            _draw_ring_block(pos["ssd_x"], pos["text_x"], model.ssd)
+            _draw_caption_value(pos["used_x"], "USED", model.ssd.used_text)
+            _draw_ring(pos["ring_x"], model.ssd)
+            _draw_caption_value(pos["free_x"], "FREE", model.ssd.free_text)
+            _draw_vertical_block(pos["ram_x"], model.ram)
+            _draw_vertical_block(pos["cpu_x"], model.cpu)
         except Exception:  # noqa: BLE001 - never let a draw failure crash the menu bar
             return False
         return True
