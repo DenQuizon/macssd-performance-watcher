@@ -121,13 +121,14 @@ def build_compact_model(
 # --- drawing -----------------------------------------------------------------
 
 IMAGE_HEIGHT = 22.0
-_RING_SIZE = 18.0
+_RING_SIZE = 19.0
 _RING_LINE = 3.4
 _BAR_W = 8.0
-_BAR_H = 19.0
-_LABEL_SIZE = 13.0
-_VALUE_SIZE = 13.0
-_UNIT_SIZE = 10.5
+_BAR_H = 20.0
+TEXT_SIZE = 15.0  # shared with the temperature title text in menubar.py
+_LABEL_SIZE = TEXT_SIZE
+_VALUE_SIZE = TEXT_SIZE
+_UNIT_SIZE = 12.0
 _GAP = 7.0
 _SMALL_GAP = 4.0
 

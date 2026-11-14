@@ -214,10 +214,14 @@ def _attributed_title(segments: list[TitleSegment], blink_off: bool = False):
     the default (unhighlighted) look, then the next frame turns them red
     again, giving temperature specifically an attention-grabbing flash.
     """
-    from AppKit import NSColor, NSForegroundColorAttributeName
+    from AppKit import NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName
 
     full = "".join(s.text for s in segments)
     attr = NSMutableAttributedString.alloc().initWithString_(full)
+    # Same size as the CPU/RAM/SSD graphics so the whole strip reads evenly.
+    attr.addAttribute_value_range_(
+        NSFontAttributeName, NSFont.systemFontOfSize_(menubar_render.TEXT_SIZE), NSRange(0, len(full))
+    )
     pos = 0
     for seg in segments:
         skip = seg.blinkable and seg.severity == "critical" and blink_off
