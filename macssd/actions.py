@@ -98,3 +98,37 @@ def throttle_process(pid: int, expected_create_time: float) -> tuple[bool, str]:
         detail = result.stderr.strip() or f"taskpolicy exited with code {result.returncode}"
         return False, f"Could not throttle it: {detail}"
     return True, f"Throttled {name} (pid {pid}) to background priority."
+
+
+def restore_process(pid: int, expected_create_time: float) -> tuple[bool, str]:
+    """Undo throttle_process() (taskpolicy -B) once a process has calmed down.
+
+    Same expected_create_time re-check as throttle_process()/close_process() —
+    a pid can be reused by an unrelated process between when it was flagged
+    as calm and when this actually runs.
+    """
+    try:
+        proc = psutil.Process(pid)
+        if abs(proc.create_time() - expected_create_time) > 0.01:
+            return False, "That process has changed since it was throttled — nothing was restored."
+        name = proc.name()
+    except psutil.NoSuchProcess:
+        return False, "That process is already gone."
+    except psutil.AccessDenied:
+        return False, "Permission denied — this process belongs to another user."
+
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/taskpolicy", "-B", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "taskpolicy did not respond in time."
+    except OSError as exc:
+        return False, f"Could not restore it: {exc}"
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"taskpolicy exited with code {result.returncode}"
+        return False, f"Could not restore it: {detail}"
+    return True, f"Restored {name} (pid {pid}) to normal priority."

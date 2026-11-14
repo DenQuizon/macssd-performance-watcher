@@ -21,7 +21,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 
-from macssd.collectors.disk import DRIVES, physical_io_key
+from macssd.collectors.disk import DriveTarget, discover_drives
 
 REFRESH_SECONDS = 10.0
 _DEFAULT_WARN_C = 70
@@ -64,20 +64,24 @@ def smartctl_available() -> bool:
 
 
 def _read_smart(device: str) -> dict | None:
-    """Run smartctl -a -j on a whole-disk device, returning parsed JSON or None."""
+    """Run smartctl -a -j on a whole-disk device, returning parsed JSON or None.
+
+    Some NVMe controllers permit this query for the logged-in user, while
+    others require elevated access.  Try the non-privileged query first so a
+    missing passwordless-sudo rule never hides data that macOS will provide.
+    """
     cmd = _smartctl_path() or "smartctl"
-    try:
-        proc = subprocess.run(
-            [cmd, "-a", "-j", device],
-            capture_output=True,
-            timeout=_SMARTCTL_TIMEOUT,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return None
-    try:
-        return json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return None
+    def run(args: list[str]) -> dict | None:
+        try:
+            proc = subprocess.run(args, capture_output=True, timeout=_SMARTCTL_TIMEOUT)
+            return json.loads(proc.stdout)
+        except (subprocess.SubprocessError, OSError, json.JSONDecodeError):
+            return None
+
+    direct = run([cmd, "-a", "-j", device])
+    if direct and ("temperature" in direct or "nvme_smart_health_information_log" in direct):
+        return direct
+    return run(["sudo", "-n", cmd, "-a", "-j", device])
 
 
 def _evaluate(data: dict, name: str) -> DriveHealth:
@@ -121,18 +125,10 @@ def _evaluate(data: dict, name: str) -> DriveHealth:
 
 
 class HealthCollector:
-    def __init__(self, drives=DRIVES) -> None:
-        self._drives = list(drives)
-        self._keys: dict[str, str | None] = {}
+    def __init__(self, drives: list[DriveTarget] | None = None) -> None:
+        self._drives = list(drives) if drives is not None else discover_drives()
         self._cache: dict[str, DriveHealth] = {}
         self._last_run: float | None = None
-
-    def _resolve(self, name: str, mountpoint: str) -> str | None:
-        key = self._keys.get(name, "?")
-        if key == "?" or key is None:
-            key = physical_io_key(mountpoint)
-            self._keys[name] = key
-        return key
 
     def sample(self, force: bool = False) -> dict[str, DriveHealth]:
         """Return per-drive health, re-checking smartctl at most every REFRESH_SECONDS."""
@@ -143,24 +139,19 @@ class HealthCollector:
 
         self._last_run = now
         if not smartctl_available():
-            for name, _ in self._drives:
-                self._cache[name] = DriveHealth(
-                    name, False, reason="smartctl is not installed."
+            for drive in self._drives:
+                self._cache[drive.name] = DriveHealth(
+                    drive.name, False, reason="smartctl is not installed."
                 )
             return self._cache
 
-        for name, mountpoint in self._drives:
-            key = self._resolve(name, mountpoint)
-            if key is None:
-                self._cache[name] = DriveHealth(name, False, reason="Drive not connected.")
-                continue
-            data = _read_smart(f"/dev/{key}")
+        for drive in self._drives:
+            data = _read_smart(f"/dev/{drive.device}")
             if not data or "temperature" not in data and "nvme_smart_health_information_log" not in data:
-                self._keys[name] = None  # allow re-resolve if it comes back
-                self._cache[name] = DriveHealth(
-                    name, False, reason="Health data unavailable for this drive."
+                self._cache[drive.name] = DriveHealth(
+                    drive.name, False, reason="Health data unavailable for this drive."
                 )
                 continue
-            self._cache[name] = _evaluate(data, name)
+            self._cache[drive.name] = _evaluate(data, drive.name)
 
         return self._cache

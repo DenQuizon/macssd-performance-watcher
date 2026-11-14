@@ -20,15 +20,11 @@ from dataclasses import dataclass, field
 
 from macssd.collectors.health import DriveHealth
 from macssd.collectors.processes import ProcInfo
-from macssd.collectors.system import SystemStats
 
 WINDOW_SECONDS = 300  # look back up to 5 minutes for the temperature-rise rule
 MIN_WINDOW_SECONDS = 90  # need at least this much history before judging a trend
 TEMP_RISE_THRESHOLD_C = 5
-CPU_BUSY_THRESHOLD = 85
-RAM_FULL_THRESHOLD = 85
 ACTIVE_WRITE_MBS = 5  # a process writing at least this fast counts as a "contributor"
-AI_DEV_DOMINANT_SHARE = 0.5  # AI/DEV tools using over half of busy-process CPU
 
 
 @dataclass
@@ -71,7 +67,6 @@ class InsightEngine:
 
     def sample(
         self,
-        stats: SystemStats,
         health_results: dict[str, DriveHealth],
         top_procs: list[ProcInfo],
     ) -> list[Insight]:
@@ -89,11 +84,7 @@ class InsightEngine:
             if name not in seen:
                 del self._temps[name]
 
-        insights: list[Insight] = []
-        insights.extend(self._temperature_insights(top_procs))
-        insights.extend(self._cpu_insight(stats, top_procs))
-        insights.extend(self._ram_insight(stats, top_procs))
-        insights.extend(self._ai_dev_insight(stats, top_procs))
+        insights: list[Insight] = self._temperature_insights(top_procs)
 
         if not insights:
             insights.append(Insight("ok", "Everything looks normal — no unusual load right now."))
@@ -124,33 +115,3 @@ class InsightEngine:
             detail = f"Now {current}°C. {detail}".strip()
             out.append(Insight("warn", headline, detail))
         return out
-
-    def _cpu_insight(self, stats: SystemStats, top_procs: list[ProcInfo]) -> list[Insight]:
-        if stats.cpu_percent < CPU_BUSY_THRESHOLD:
-            return []
-        top = sorted(top_procs, key=lambda p: p.cpu, reverse=True)[:3]
-        names = ", ".join(p.name for p in top) if top else "no single process stands out"
-        headline = f"CPU is very busy ({stats.cpu_percent:.0f}%). Top users: {names}."
-        detail = ", ".join(f"{p.name} {p.cpu:.0f}%" for p in top)
-        return [Insight("warn", headline, detail)]
-
-    def _ram_insight(self, stats: SystemStats, top_procs: list[ProcInfo]) -> list[Insight]:
-        if stats.ram_percent < RAM_FULL_THRESHOLD:
-            return []
-        top = sorted(top_procs, key=lambda p: p.mem_mb, reverse=True)[:3]
-        names = ", ".join(p.name for p in top) if top else "no single process stands out"
-        headline = f"Memory is nearly full ({stats.ram_percent:.0f}%). Top users: {names}."
-        detail = ", ".join(f"{p.name} {p.mem_mb:.0f} MB" for p in top)
-        return [Insight("warn", headline, detail)]
-
-    def _ai_dev_insight(self, stats: SystemStats, top_procs: list[ProcInfo]) -> list[Insight]:
-        busy_cpu = sum(p.cpu for p in top_procs)
-        if busy_cpu <= 0:
-            return []
-        ai_cpu = sum(p.cpu for p in top_procs if p.tag == "AI/DEV")
-        if ai_cpu / busy_cpu < AI_DEV_DOMINANT_SHARE:
-            return []
-        headline = "Your AI/developer tools are using most of the CPU right now."
-        names = ", ".join(p.name for p in top_procs if p.tag == "AI/DEV")
-        detail = f"{ai_cpu:.0f}% of {busy_cpu:.0f}% busy-process CPU: {names}"
-        return [Insight("info", headline, detail)]

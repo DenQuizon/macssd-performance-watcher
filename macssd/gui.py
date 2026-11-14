@@ -46,17 +46,17 @@ from AppKit import (
 from Foundation import NSObject
 
 from macssd.actions import classify_kill_safety, close_process
-from macssd.collectors import disk, health, processes, system, thermal
+from macssd.collectors import health, processes, thermal
 from macssd.insights import InsightEngine
-from macssd.severity import THERMAL_SEVERITY, cpu_severity, ram_severity, storage_severity
-from macssd.storage import is_login_item_enabled, read_storage
+from macssd.severity import THERMAL_SEVERITY, cpu_temp_severity
+from macssd.storage import is_login_item_enabled
 
 warnings.filterwarnings("ignore", category=objc.ObjCPointerWarning)
 
 WINDOW_WIDTH = 640
 # Extra height gives the process list room to breathe while keeping the
 # dashboard anchored as a compact popover under the 700px width cap.
-WINDOW_HEIGHT = 736
+WINDOW_HEIGHT = 560
 FOOTER_HEIGHT = 54
 REFRESH_SECONDS = 2.0
 PROCESS_ROWS = 15
@@ -120,59 +120,6 @@ def _colored_view(frame, color, corner_radius: float | None = None) -> NSView:
 
 
 CARD_RADIUS = 10
-
-
-class MetricCard:
-    """A label, a big value, and a coloured progress bar — one per metric."""
-
-    def __init__(self, parent: NSView, title: str, x: float, y: float, w: float, h: float = 78) -> None:
-        container = _colored_view(
-            NSMakeRect(x, y, w, h), NSColor.controlBackgroundColor(), corner_radius=CARD_RADIUS
-        )
-        parent.addSubview_(container)
-        self.container = container
-
-        container.addSubview_(_label(title, 14, h - 26, w - 28, 16, 12))
-        self.value_label = _label("--", 14, h - 54, w - 28, 26, 22, bold=True)
-        container.addSubview_(self.value_label)
-
-        track_w = w - 28
-        self.track = _colored_view(NSMakeRect(14, 14, track_w, 6), NSColor.separatorColor())
-        container.addSubview_(self.track)
-        self.fill = _colored_view(NSMakeRect(14, 14, 0, 6), NSColor.systemGreenColor())
-        container.addSubview_(self.fill)
-        self._track_w = track_w
-
-    def update(self, percent: float, severity: str, value_text: str | None = None) -> None:
-        self.value_label.setStringValue_(value_text if value_text is not None else f"{percent:.0f}%")
-        color_fn = _SEVERITY_COLOR.get(severity, NSColor.systemGreenColor)
-        self.fill.layer().setBackgroundColor_(color_fn().CGColor())
-        frame = self.fill.frame()
-        frame.size.width = max(0.0, min(1.0, percent / 100)) * self._track_w
-        self.fill.setFrame_(frame)
-
-
-STORAGE_CARD_HEIGHT = 96
-
-
-class StorageCard(MetricCard):
-    """A drive's used/total capacity plus live read/write throughput."""
-
-    def __init__(self, parent: NSView, title: str, x: float, y: float, w: float) -> None:
-        super().__init__(parent, title, x, y, w, h=STORAGE_CARD_HEIGHT)
-        self.speed_label = _label("R -- MB/s   W -- MB/s", 14, 22, w - 28, 16, 11)
-        self.container.addSubview_(self.speed_label)
-
-    def update_storage(self, used_gb: float, total_gb: float) -> None:
-        pct = (used_gb / total_gb * 100) if total_gb > 0 else 0
-        severity = storage_severity(used_gb, total_gb)
-        self.update(pct, severity, value_text=f"{used_gb:.0f} / {total_gb:.0f} GB")
-
-    def update_speed(self, read_mbs: float, write_mbs: float, available: bool) -> None:
-        if not available:
-            self.speed_label.setStringValue_("R -- MB/s   W -- MB/s")
-            return
-        self.speed_label.setStringValue_(f"R {read_mbs:5.0f} MB/s   W {write_mbs:5.0f} MB/s")
 
 
 class TempCard:
@@ -353,18 +300,11 @@ class DashboardWindowController(NSObject):
         self._build_dashboard_content(content)
 
     def _build_dashboard_content(self, content: NSView, include_footer: bool = False) -> None:
-        card_w = (WINDOW_WIDTH - 14 * 3) / 2
-        metric_y = WINDOW_HEIGHT - 78 - 14
-        self.cpu_card = MetricCard(content, "CPU", 14, metric_y, card_w)
-        self.ram_card = MetricCard(content, "Memory", 14 * 2 + card_w, metric_y, card_w)
-
-        storage_y = metric_y - STORAGE_CARD_HEIGHT - 14
-        self.internal_storage = StorageCard(content, "Internal SSD", 14, storage_y, card_w)
-        self.densmate_storage = StorageCard(content, "DensMate SSD", 14 * 2 + card_w, storage_y, card_w)
-
-        temp_y = storage_y - 78 - 14
-        self.internal_temp = TempCard(content, "Internal SSD temp", 14, temp_y, card_w)
-        self.densmate_temp = TempCard(content, "DensMate SSD temp", 14 * 2 + card_w, temp_y, card_w)
+        card_w = (WINDOW_WIDTH - 14 * 4) / 3
+        temp_y = WINDOW_HEIGHT - 78 - 14
+        self.cpu_temp = TempCard(content, "CPU temp", 14, temp_y, card_w)
+        self.internal_temp = TempCard(content, "Internal SSD temp", 14 * 2 + card_w, temp_y, card_w)
+        self.external_temp = TempCard(content, "External SSD temp", 14 * 3 + card_w * 2, temp_y, card_w)
 
         thermal_y = temp_y - 24
         self.thermal_state = ThermalStateLine(content, 14, thermal_y, WINDOW_WIDTH - 28)
@@ -380,12 +320,9 @@ class DashboardWindowController(NSObject):
 
         self._health = health.HealthCollector()
         self._procs = processes.ProcessCollector()
-        self._disk = disk.DiskMonitor()
         self._insights = InsightEngine()
         self._sampling = threading.Lock()
         self._procs.prime()
-        system.prime()
-        self._disk.sample()  # prime disk counters so the first speed reading is real
         self.refresh_(None)
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             REFRESH_SECONDS, self, "refresh:", None, True
@@ -429,14 +366,12 @@ class DashboardWindowController(NSObject):
 
     def _sample_in_background(self) -> None:
         try:
-            stats = system.read()
-            storage = read_storage()
-            speeds = self._disk.sample()
             health_results = self._health.sample()
             therm = thermal.read()
+            cpu_temp = thermal.cpu_temp_c()
             self._procs.sample()
             top_procs = self._procs.top(sort_by="cpu", limit=PROCESS_ROWS)
-            insights = self._insights.sample(stats, health_results, top_procs)
+            insights = self._insights.sample(health_results, top_procs)
         except Exception:  # noqa: BLE001
             # A single bad sample (a transient OS syscall failure, a smartctl
             # hiccup) must never crash the app or freeze the UI on stale
@@ -445,30 +380,23 @@ class DashboardWindowController(NSObject):
             return
         finally:
             self._sampling.release()
-        result = (stats, storage, speeds, health_results, therm, top_procs, insights)
+        result = (health_results, therm, cpu_temp, top_procs, insights)
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "applyResult:", result, False
         )
 
     def applyResult_(self, result) -> None:
-        stats, storage, speeds, health_results, therm, top_procs, insights = result
+        health_results, therm, cpu_temp, top_procs, insights = result
 
-        self.cpu_card.update(stats.cpu_percent, cpu_severity(stats.cpu_percent))
-        self.ram_card.update(stats.ram_percent, ram_severity(stats.ram_percent))
+        cpu_temp_rounded = round(cpu_temp) if cpu_temp is not None else None
+        self.cpu_temp.update(cpu_temp_rounded, cpu_temp_severity(cpu_temp))
 
-        drives = (
-            ("Internal SSD", self.internal_storage, self.internal_temp),
-            ("DensMate SSD", self.densmate_storage, self.densmate_temp),
+        temp_cards = (
+            ("Internal SSD", self.internal_temp),
+            ("External SSD", self.external_temp),
         )
-        for name, storage_card, temp_card in drives:
-            s = storage.get(name)
-            sp = speeds.get(name)
+        for name, temp_card in temp_cards:
             h = health_results.get(name)
-            if s and s.available:
-                storage_card.update_storage(s.used_gb, s.total_gb)
-            storage_card.update_speed(
-                sp.read_mbs if sp else 0.0, sp.write_mbs if sp else 0.0, bool(sp and sp.available)
-            )
             temp_c = h.temp_c if h and h.available else None
             temp_status = h.status if h else "unknown"
             temp_card.update(temp_c, temp_status)
@@ -563,13 +491,11 @@ class DashboardPopoverController(DashboardWindowController):
     @objc.python_method
     def configure_controls(
         self,
-        storage_callback,
         temps_callback,
         login_callback,
         quit_callback,
         settings: dict | None = None,
     ) -> None:
-        self._storage_callback = storage_callback
         self._temps_callback = temps_callback
         self._login_callback = login_callback
         self._quit_callback = quit_callback
@@ -586,27 +512,17 @@ class DashboardPopoverController(DashboardWindowController):
         )
         content.addSubview_(footer)
         footer.addSubview_(_label("Settings", 14, 11, 70, 18, 12))
-        self._storage_btn = _button("Storage", 90, 7, 90, 26, self, "storageClicked:")
-        self._storage_btn.setState_(
-            NSControlStateValueOn if s.get("show_storage", True) else NSControlStateValueOff
-        )
-        self._temps_btn = _button("Temps", 188, 7, 78, 26, self, "tempsClicked:")
+        self._temps_btn = _button("Temps", 90, 7, 78, 26, self, "tempsClicked:")
         self._temps_btn.setState_(
             NSControlStateValueOn if s.get("show_temps", True) else NSControlStateValueOff
         )
-        self._login_btn = _button("Login", 274, 7, 76, 26, self, "loginClicked:")
+        self._login_btn = _button("Login", 176, 7, 76, 26, self, "loginClicked:")
         self._login_btn.setState_(
             NSControlStateValueOn if is_login_item_enabled() else NSControlStateValueOff
         )
-        footer.addSubview_(self._storage_btn)
         footer.addSubview_(self._temps_btn)
         footer.addSubview_(self._login_btn)
         footer.addSubview_(_button("Quit", WINDOW_WIDTH - 28 - 78, 7, 64, 26, self, "quitClicked:"))
-
-    def storageClicked_(self, _sender) -> None:
-        callback = getattr(self, "_storage_callback", None)
-        if callback is not None:
-            callback()
 
     def tempsClicked_(self, _sender) -> None:
         callback = getattr(self, "_temps_callback", None)

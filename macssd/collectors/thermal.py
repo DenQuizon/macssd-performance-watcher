@@ -15,6 +15,10 @@ Apple's documented enum (ProcessInfoThermalState):
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
+import time
 from dataclasses import dataclass
 
 try:
@@ -49,3 +53,59 @@ def read() -> ThermalStatus:
     raw = NSProcessInfo.processInfo().thermalState()
     state, reason = _STATES.get(raw, ("unknown", f"Unrecognised thermal state ({raw})."))
     return ThermalStatus(True, state, reason)
+
+
+# --- Numeric CPU temperature, via macmon (no sudo required) ----------------
+#
+# NSProcessInfo.thermalState() above answers "is the Mac under thermal
+# pressure" but never gives a number. macmon (https://github.com/vladkens/macmon)
+# reads Apple Silicon's real SMC temperature sensors without root, so this
+# gives an actual degrees-C reading to show alongside the two SSD temps.
+#
+# Shelling out takes ~0.3-0.5s even with a short sample interval, so this
+# caches like health.py's smartctl calls do — call cpu_temp() every tick,
+# it only actually runs macmon every REFRESH_SECONDS.
+
+CPU_TEMP_REFRESH_SECONDS = 8.0
+
+_macmon_cache: float | None = None
+_macmon_last_run: float | None = None
+
+
+def _macmon_path() -> str | None:
+    return shutil.which("macmon") or (
+        "/opt/homebrew/bin/macmon" if shutil.which("/opt/homebrew/bin/macmon") else None
+    )
+
+
+def cpu_temp_available() -> bool:
+    return _macmon_path() is not None
+
+
+def cpu_temp_c(force: bool = False) -> float | None:
+    """Current CPU temperature in Celsius, or None if macmon isn't installed
+    or the reading failed. Cached for CPU_TEMP_REFRESH_SECONDS between calls."""
+    global _macmon_cache, _macmon_last_run
+    now = time.monotonic()
+    due = _macmon_last_run is None or (now - _macmon_last_run) >= CPU_TEMP_REFRESH_SECONDS
+    if not due and not force:
+        return _macmon_cache
+
+    _macmon_last_run = now
+    cmd = _macmon_path()
+    if cmd is None:
+        _macmon_cache = None
+        return None
+
+    try:
+        proc = subprocess.run(
+            [cmd, "pipe", "-i", "200", "-s", "1"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        data = json.loads(proc.stdout)
+        _macmon_cache = float(data["temp"]["cpu_temp_avg"])
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError, KeyError, ValueError, TypeError):
+        _macmon_cache = None
+    return _macmon_cache

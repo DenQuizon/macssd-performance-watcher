@@ -71,7 +71,8 @@ def _busiest(speeds: dict[str, disk.DriveSpeed]) -> str:
 def render_storage(monitor: disk.DiskMonitor, speeds: dict[str, disk.DriveSpeed]) -> str:
     """Build the Storage panel text: headline, then a line per drive with sparklines."""
     lines = [f"[b]{_busiest(speeds)}[/b]", ""]
-    for name, _ in monitor._drives:
+    for drive in monitor._drives:
+        name = drive.name
         s = speeds.get(name) or disk.DriveSpeed(name, available=False)
         if not s.available:
             lines.append(f"[dim]{name:12}[/dim] not connected")

@@ -10,15 +10,20 @@ Run with: "./.venv/bin/python" -m macssd.menubar
 from __future__ import annotations
 
 import json
+import threading
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
+import psutil
 import rumps
 from Foundation import NSMutableAttributedString, NSObject, NSRange
 
-from macssd import gui, severity
+from macssd import action_log, gui, menubar_render, severity
+from macssd.actions import classify_kill_safety, restore_process, throttle_process
 from macssd.collectors import health, system, thermal
+from macssd.collectors.processes import classify
 from macssd.storage import (
     StorageUsage,
     disable_login_item,
@@ -28,10 +33,22 @@ from macssd.storage import (
 )
 
 REFRESH_SECONDS = 3.0
+STORAGE_REFRESH_SECONDS = 30.0  # used/free GB changes slowly; diskutil discovery is not free
 BLINK_SECONDS = 0.6  # how fast the title flashes when something is critical
 
+# Continuous throttling: deliberately much slower than REFRESH_SECONDS above.
+# Scanning every process's CPU% is real work — doing it every 3s the way temps
+# refresh would add a constant, avoidable drain of its own (the exact
+# counterintuitive problem this feature exists to prevent). Every 25s, only
+# acting after a process is confirmed hot across two consecutive scans (~50s
+# sustained, not a brief spike), keeps the added overhead small and bounded.
+THROTTLE_SCAN_SECONDS = 60.0
+THROTTLE_CPU_THRESHOLD = 85.0
+THROTTLE_CONFIRM_SCANS = 2  # ~2 minutes of sustained high CPU before acting
+THROTTLE_RESTORE_BELOW = 40.0
+
 _SETTINGS_PATH = Path.home() / ".macssd" / "menubar_settings.json"
-_DEFAULT_SETTINGS = {"show_storage": True, "show_temps": True}
+_DEFAULT_SETTINGS = {"show_temps": True}
 
 
 def load_settings() -> dict:
@@ -52,17 +69,14 @@ def save_settings(settings: dict) -> None:
 def _drive_label(name: str) -> str:
     if "Internal" in name:
         return "Int"
-    if "DensMate" in name:
+    if "External" in name:
         return "Ext"
     return name[:3]
 
 
-# Re-exported under the old private names so existing imports/tests are
+# Re-exported under the old private name so existing imports/tests are
 # unaffected — the actual logic now lives in severity.py, shared with the
 # hourly watcher, so the two never quietly disagree about thresholds.
-_cpu_severity = severity.cpu_severity
-_ram_severity = severity.ram_severity
-_storage_severity = severity.storage_severity
 _THERMAL_SEVERITY = severity.THERMAL_SEVERITY
 
 
@@ -74,55 +88,93 @@ class TitleSegment:
 
 
 def build_segments(
-    stats: system.SystemStats,
-    storage: dict[str, StorageUsage],
     health_results: dict[str, health.DriveHealth],
     therm: thermal.ThermalStatus,
     settings: dict,
+    cpu_temp_c: float | None = None,
 ) -> list[TitleSegment]:
-    """Build the coloured menu bar segments. Storage/temps are optional per settings."""
-    segs = [
-        TitleSegment(f"CPU {stats.cpu_percent:.0f}%", _cpu_severity(stats.cpu_percent)),
-        TitleSegment("  "),
-        TitleSegment(f"RAM {stats.ram_percent:.0f}%", _ram_severity(stats.ram_percent)),
-    ]
+    """Build the coloured menu bar segments: CPU temp + per-drive temps + Mac thermal state."""
+    segs: list[TitleSegment] = []
 
-    if settings.get("show_storage", True):
-        for name, s in storage.items():
-            segs.append(TitleSegment("  "))
-            label = _drive_label(name)
-            if s.available and s.total_gb > 0:
-                segs.append(TitleSegment(
-                    f"{label} {s.used_gb:.0f}/{s.total_gb:.0f}GB",
-                    _storage_severity(s.used_gb, s.total_gb),
-                ))
-            else:
-                segs.append(TitleSegment(f"{label} --"))
+    if not settings.get("show_temps", True):
+        return [TitleSegment("MACSSD (temps hidden)")]
 
-    if settings.get("show_temps", True):
-        if therm.available and therm.state:
-            segs.append(TitleSegment("  "))
-            segs.append(TitleSegment(
-                f"Mac {therm.state}", _THERMAL_SEVERITY.get(therm.state, "neutral"), blinkable=True
-            ))
-        for name, h in health_results.items():
-            segs.append(TitleSegment("  "))
-            label = _drive_label(name)
-            if h.available and h.temp_c is not None:
-                sev = h.status if h.status in ("ok", "warn", "critical") else "neutral"
-                segs.append(TitleSegment(f"{label} {h.temp_c}°C", sev, blinkable=True))
-            else:
-                segs.append(TitleSegment(f"{label} --"))
+    cpu_sev = severity.cpu_temp_severity(cpu_temp_c)
+    if cpu_temp_c is not None:
+        segs.append(TitleSegment(f"CPU {cpu_temp_c:.0f}°C", cpu_sev, blinkable=True))
+    else:
+        segs.append(TitleSegment("CPU --"))
 
+    for name, h in health_results.items():
+        if segs:
+            segs.append(TitleSegment("  "))
+        label = _drive_label(name)
+        if h.available and h.temp_c is not None:
+            sev = h.status if h.status in ("ok", "warn", "critical") else "neutral"
+            segs.append(TitleSegment(f"{label} {h.temp_c}°C", sev, blinkable=True))
+        else:
+            segs.append(TitleSegment(f"{label} --"))
+
+    if therm.available and therm.state:
+        if segs:
+            segs.append(TitleSegment("  "))
+        segs.append(TitleSegment(
+            f"Mac {therm.state}", _THERMAL_SEVERITY.get(therm.state, "neutral"), blinkable=True
+        ))
+
+    return segs or [TitleSegment("MACSSD --")]
+
+
+def build_compact_temp_segments(
+    health_results: dict[str, health.DriveHealth],
+    therm: thermal.ThermalStatus,
+    settings: dict,
+    cpu_temp_c: float | None = None,
+) -> list[TitleSegment]:
+    """Short temperature text shown beside the CPU/RAM/SSD graphics.
+
+    Always shows the drive temperatures (e.g. "39°/38°"). The CPU temperature
+    and Mac thermal state only appear when they need attention; the full list
+    stays in the tooltip and dashboard. Empty when temperatures are hidden.
+    """
+    if not settings.get("show_temps", True):
+        return []
+
+    segs: list[TitleSegment] = []
+    temps = [h for h in health_results.values() if h.available and h.temp_c is not None]
+    if temps:
+        order = {"critical": 2, "warn": 1}
+        worst = max((order.get(h.status, 0) for h in temps), default=0)
+        sev = {2: "critical", 1: "warn", 0: "neutral"}[worst]
+        segs.append(TitleSegment("/".join(f"{h.temp_c}°" for h in temps), sev, blinkable=True))
+
+    cpu_sev = severity.cpu_temp_severity(cpu_temp_c)
+    if cpu_temp_c is not None and cpu_sev in ("warn", "critical"):
+        segs.append(TitleSegment(f" CPU {cpu_temp_c:.0f}°C", cpu_sev, blinkable=True))
+
+    therm_sev = _THERMAL_SEVERITY.get(therm.state, "neutral") if therm.available else "neutral"
+    if therm_sev in ("warn", "critical"):
+        segs.append(TitleSegment(f" Mac {therm.state}", therm_sev, blinkable=True))
     return segs
 
 
-def tooltip_text(segments: list[TitleSegment]) -> str:
+def tooltip_text(segments: list[TitleSegment], model: menubar_render.CompactModel | None = None) -> str:
     """One reading per line, for hovering over the (deliberately compact)
     menu bar title to see everything spelled out."""
+    lines = ["MACSSD_Performance Watcher"]
+    if model is not None:
+        lines.append(f"CPU {model.cpu.text}")
+        lines.append(f"RAM {model.ram.text}")
+        if model.ssd.available:
+            lines.append(
+                f"Internal SSD {model.ssd.used_gb:.0f} GB used, {model.ssd.free_gb:.0f} GB free"
+                f" of {model.ssd.total_gb:.0f} GB"
+            )
+        else:
+            lines.append("Internal SSD --")
     text = "".join(s.text for s in segments).strip()
-    parts = [p.strip() for p in text.split("  ") if p.strip()]
-    return "MACSSD_Performance Watcher\n" + "\n".join(parts)
+    lines.extend(p.strip() for p in text.split("  ") if p.strip())
+    return "\n".join(lines)
 
 
 def has_blinking_critical(segments: list[TitleSegment]) -> bool:
@@ -131,17 +183,15 @@ def has_blinking_critical(segments: list[TitleSegment]) -> bool:
 
 
 def render_menubar_title(
-    stats: system.SystemStats,
     health_results: dict[str, health.DriveHealth],
     therm: thermal.ThermalStatus,
-    storage: dict[str, StorageUsage] | None = None,
     settings: dict | None = None,
+    cpu_temp_c: float | None = None,
 ) -> str:
     """Plain-text rendering of the segments — kept for headless testing and
     as the fallback when PyObjC colour attributes aren't available."""
-    storage = storage if storage is not None else {}
     settings = settings if settings is not None else _DEFAULT_SETTINGS
-    segs = build_segments(stats, storage, health_results, therm, settings)
+    segs = build_segments(health_results, therm, settings, cpu_temp_c)
     return "".join(s.text for s in segs)
 
 
@@ -186,7 +236,6 @@ class MenuBarApp(rumps.App):
         self.settings = load_settings()
         self._dashboard = gui.DashboardPopoverController.alloc().init()
         self._dashboard.configure_controls(
-            lambda: self.toggle_storage(),
             lambda: self.toggle_temps(),
             lambda: self.toggle_login_item(),
             lambda: rumps.quit_application(),
@@ -204,6 +253,11 @@ class MenuBarApp(rumps.App):
         system.prime()
         self._blink_on = True
         self._last_segments: list[TitleSegment] = []
+        self._compact_segments: list[TitleSegment] = []
+        self._model = menubar_render.build_compact_model(None, None)
+        self._storage: dict[str, StorageUsage] = {}
+        self._storage_at = 0.0
+        self._storage_busy = False
 
         self._timer = rumps.Timer(self.refresh, REFRESH_SECONDS)
         self._timer.start()
@@ -230,11 +284,6 @@ class MenuBarApp(rumps.App):
         button.setTarget_(self._status_click_target)
         button.setAction_("callback:")
 
-    def toggle_storage(self, sender=None) -> None:
-        self.settings["show_storage"] = not self.settings.get("show_storage", True)
-        save_settings(self.settings)
-        self.refresh()
-
     def toggle_temps(self, sender=None) -> None:
         self.settings["show_temps"] = not self.settings.get("show_temps", True)
         save_settings(self.settings)
@@ -253,15 +302,38 @@ class MenuBarApp(rumps.App):
         # smartctl hiccup) must never crash the menu bar or freeze it on a
         # stale error state — skip this tick and try again next time.
         try:
-            stats = system.read()
-            storage = read_storage()
             health_results = self._health.sample()
             therm = thermal.read()
-            self._last_segments = build_segments(stats, storage, health_results, therm, self.settings)
+            cpu_temp_c = thermal.cpu_temp_c()
+            self._last_segments = build_segments(health_results, therm, self.settings, cpu_temp_c)
+            self._compact_segments = build_compact_temp_segments(
+                health_results, therm, self.settings, cpu_temp_c
+            )
+            self._refresh_storage_async()
+            self._model = menubar_render.build_compact_model(system.read(), self._storage)
             self._apply_title()
         except Exception:  # noqa: BLE001
             print("menubar refresh skipped, full error below:")
             traceback.print_exc()
+
+    def _refresh_storage_async(self) -> None:
+        """Read internal SSD used/free off the main thread, at most every 30s
+        (drive discovery shells out to diskutil)."""
+        now = time.monotonic()
+        if self._storage_busy or now - self._storage_at < STORAGE_REFRESH_SECONDS:
+            return
+        self._storage_busy = True
+        self._storage_at = now
+
+        def work() -> None:
+            try:
+                self._storage = read_storage()
+            except Exception:  # noqa: BLE001
+                traceback.print_exc()
+            finally:
+                self._storage_busy = False
+
+        threading.Thread(target=work, daemon=True).start()
 
     def blink(self, _sender=None) -> None:
         """Flash temperature segments on/off when critical; a no-op otherwise.
@@ -273,12 +345,20 @@ class MenuBarApp(rumps.App):
 
     def _apply_title(self) -> None:
         try:
-            attr = _attributed_title(self._last_segments, blink_off=not self._blink_on)
-            self._nsapp.nsstatusitem.setAttributedTitle_(attr)
-            self._nsapp.nsstatusitem.button().setToolTip_(tooltip_text(self._last_segments))
+            item = self._nsapp.nsstatusitem
+            button = item.button()
+            button.setImage_(menubar_render.render_image(self._model))
+            button.setImagePosition_(2)  # NSImageLeft: graphics first, temps after
+            attr = _attributed_title(self._compact_segments, blink_off=not self._blink_on)
+            item.setAttributedTitle_(attr)
+            button.setToolTip_(tooltip_text(self._last_segments, self._model))
         except Exception:  # noqa: BLE001
-            # Fall back to plain text if PyObjC colouring isn't available.
-            self.title = "".join(s.text for s in self._last_segments)
+            # Fall back to plain text if PyObjC drawing/colouring isn't available.
+            traceback.print_exc()
+            m = self._model
+            self.title = f"CPU {m.cpu.text} RAM {m.ram.text} " + "".join(
+                s.text for s in self._compact_segments
+            )
 
 
 class _StatusItemClickTarget(NSObject):

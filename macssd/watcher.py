@@ -1,9 +1,9 @@
-"""MACSSD_Performance Watcher — hourly background check.
+"""MACSSD_Performance Watcher — periodic background check.
 
-Meant to be triggered once per hour by a launchd LaunchAgent, not run as a
-long-lived loop itself. Always sends a compact heartbeat to Telegram; on
-critical CPU/RAM/storage severity it throttles the top CPU consumer; on
-critical drive temperature it escalates to a 5-minute shutdown warning.
+Meant to be triggered every 30 minutes by a launchd LaunchAgent, not run as a
+long-lived loop itself. Always sends a compact heartbeat to Telegram (drive
+temps + Mac thermal state only); on critical drive temperature it throttles
+the top CPU consumer and escalates to a 5-minute shutdown warning.
 """
 
 from __future__ import annotations
@@ -15,18 +15,18 @@ from pathlib import Path
 
 import psutil
 
-from macssd import telegram
+from macssd import action_log, telegram
 from macssd.actions import throttle_process
-from macssd.collectors import system
 from macssd.collectors.health import HealthCollector
-from macssd.dashboard_image import render_dashboard_image
-from macssd.severity import cpu_severity, ram_severity, storage_severity
-from macssd.storage import read_storage
+from macssd.collectors.thermal import cpu_temp_c, read as thermal_read
+from macssd.severity import THERMAL_SEVERITY, cpu_temp_severity
 
 _LOG_PATH = Path.home() / ".macssd" / "watcher.log"
 _SHUTDOWN_WAIT_SECONDS = 300
+_HEARTBEAT_INTERVAL_SECONDS = 1800  # must match the launchd StartCalendarInterval spacing
 
 _SEVERITY_RANK = {"ok": 0, "unknown": 0, "warn": 1, "critical": 2}
+_SEVERITY_EMOJI = {"ok": "✅", "warn": "⚠️", "critical": "🔥", "unknown": "❔"}
 
 
 def _worst(severities: list[str]) -> str:
@@ -68,7 +68,10 @@ def _throttle_top_process() -> str:
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return "Top process vanished before it could be throttled."
     ok, detail = throttle_process(pid, create_time)
-    return f"Throttle {name} (pid {pid}): {detail}" if not ok else detail
+    message = f"Throttle {name} (pid {pid}): {detail}" if not ok else detail
+    if ok:
+        action_log.record(message)
+    return message
 
 
 def _shut_down_if_no_reply(after_update_id: int) -> None:
@@ -99,51 +102,43 @@ def _shut_down_if_no_reply(after_update_id: int) -> None:
 
 
 def run_once() -> None:
-    stats = system.read()
-    cpu_sev = cpu_severity(stats.cpu_percent)
-    ram_sev = ram_severity(stats.ram_percent)
-
-    storage = read_storage()
-    storage_sevs = {
-        name: storage_severity(usage.used_gb, usage.total_gb) if usage.available else "ok"
-        for name, usage in storage.items()
-    }
-
     health_results = HealthCollector().sample(force=True)
+    therm = thermal_read()
+    cpu_temp = cpu_temp_c(force=True)
+
     # DriveHealth.status is already a severity word ("ok"/"warn"/"critical"/
     # "unknown") — THERMAL_SEVERITY's keys are SMART condition names, not
     # this, so mapping through it here would silently drop "warn".
-    thermal_sevs = {
+    drive_sevs = {
         name: (drive.status if drive.status in ("ok", "warn", "critical") else "ok")
         for name, drive in health_results.items()
     }
+    mac_sev = THERMAL_SEVERITY.get(therm.state, "unknown") if therm.available else "unknown"
+    cpu_sev = cpu_temp_severity(cpu_temp)
 
-    overall = _worst([cpu_sev, ram_sev, *storage_sevs.values(), *thermal_sevs.values()])
+    overall = _worst([*drive_sevs.values(), mac_sev, cpu_sev])
 
-    lines = [
-        f"MACSSD hourly heartbeat — {overall.upper()}",
-        f"CPU {stats.cpu_percent:.0f}% ({cpu_sev})  RAM {stats.ram_percent:.0f}% ({ram_sev})",
-    ]
+    lines = [f"{_SEVERITY_EMOJI[overall]} MACSSD heartbeat — {overall.upper()}"]
+    if cpu_temp is not None:
+        lines.append(f"{_SEVERITY_EMOJI[cpu_sev]} CPU: {cpu_temp:.0f}°C")
     for name, drive in health_results.items():
-        temp = f"{drive.temp_c}C" if drive.temp_c is not None else "n/a"
-        lines.append(f"{name}: {temp}, {drive.status}")
+        temp = f"{drive.temp_c}°C" if drive.temp_c is not None else "n/a"
+        sev = drive_sevs[name]
+        lines.append(f"{_SEVERITY_EMOJI[sev]} {name}: {temp}")
+    if therm.available:
+        lines.append(f"{_SEVERITY_EMOJI[mac_sev]} Mac thermal: {therm.state}")
 
     if overall == "critical":
-        lines.append(_throttle_top_process())
+        _throttle_top_process()  # logs to action_log itself; picked up below
 
-    caption = "\n".join(lines)
-    try:
-        image_path = render_dashboard_image()
-    except Exception:  # noqa: BLE001
-        logging.exception("render_dashboard_image() failed — falling back to a text heartbeat")
-        telegram.send_message(caption)
-    else:
-        ok, detail = telegram.send_photo(image_path, caption=caption)
-        if not ok:
-            logging.error("send_photo failed (%s) — falling back to a text heartbeat", detail)
-            telegram.send_message(caption)
+    recent_actions = action_log.recent(_HEARTBEAT_INTERVAL_SECONDS)
+    if recent_actions:
+        lines.append("🛠️ Auto-actions taken:")
+        lines.extend(f"  {a}" for a in recent_actions)
 
-    critical_drive = any(sev == "critical" for sev in thermal_sevs.values())
+    telegram.send_message("\n".join(lines))
+
+    critical_drive = any(sev == "critical" for sev in drive_sevs.values())
     if critical_drive:
         after_update_id = telegram.latest_update_id()
         telegram.send_message(

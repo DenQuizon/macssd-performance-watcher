@@ -1,6 +1,5 @@
-"""Regression test: only temperature segments should be marked blinkable, so
-a critical CPU/RAM/storage reading stays solid red while a critical
-temperature reading is the one that actually flashes.
+"""Regression test: temperature segments (drive or Mac thermal state) are the
+only ones marked blinkable, and only actually blink when critical.
 
 Run with: "./.venv/bin/python" -m tests.test_menubar_blink
 """
@@ -8,41 +7,36 @@ Run with: "./.venv/bin/python" -m tests.test_menubar_blink
 import sys
 
 from macssd.collectors.health import DriveHealth
-from macssd.collectors.system import SystemStats
 from macssd.collectors.thermal import ThermalStatus
 from macssd.menubar import build_segments, has_blinking_critical
 
-settings = {"show_storage": True, "show_temps": True}
+settings = {"show_temps": True}
 
 try:
-    # Critical CPU, everything else normal -> must NOT trigger blinking.
-    stats = SystemStats(95, 0, 0, 50, 0, 0, 0)
+    # Normal drive temp, normal thermal state -> no blinking.
     health_results = {
         "Internal SSD": DriveHealth("Internal SSD", True, "ok", 40, 70, 85, 0, 100, 0, "Healthy.")
     }
     therm = ThermalStatus(True, "nominal", "ok")
-    segs = build_segments(stats, {}, health_results, therm, settings)
-    cpu_seg = next(s for s in segs if s.text.startswith("CPU"))
-    assert cpu_seg.severity == "critical", "CPU 95% should be classified critical"
-    assert cpu_seg.blinkable is False, "CPU must never be marked blinkable"
-    assert has_blinking_critical(segs) is False, (
-        "a critical CPU alone must not trigger the blink, only temperature does"
-    )
+    segs = build_segments(health_results, therm, settings)
+    temp_seg = next(s for s in segs if s.text.startswith("Int") and "°C" in s.text)
+    assert temp_seg.severity == "ok", "40C should be classified ok"
+    assert temp_seg.blinkable is True, "drive temperature must always be marked blinkable"
+    assert has_blinking_critical(segs) is False, "a normal temperature must not trigger the blink"
 
     # Critical drive temperature -> SHOULD trigger blinking.
-    stats2 = SystemStats(20, 0, 0, 30, 0, 0, 0)
     health_results2 = {
         "Internal SSD": DriveHealth("Internal SSD", True, "critical", 92, 70, 85, 0, 100, 0, "too hot")
     }
-    segs2 = build_segments(stats2, {}, health_results2, therm, settings)
-    temp_seg = next(s for s in segs2 if s.text.startswith("Int") and "°C" in s.text)
-    assert temp_seg.severity == "critical", "92C should be classified critical"
-    assert temp_seg.blinkable is True, "drive temperature must be marked blinkable"
+    segs2 = build_segments(health_results2, therm, settings)
+    temp_seg2 = next(s for s in segs2 if s.text.startswith("Int") and "°C" in s.text)
+    assert temp_seg2.severity == "critical", "92C should be classified critical"
+    assert temp_seg2.blinkable is True, "drive temperature must be marked blinkable"
     assert has_blinking_critical(segs2) is True, "a critical temperature must trigger the blink"
 
     # Critical Mac thermal state -> also blinkable.
     therm_crit = ThermalStatus(True, "critical", "overheating")
-    segs3 = build_segments(stats2, {}, {}, therm_crit, settings)
+    segs3 = build_segments({}, therm_crit, settings)
     mac_seg = next(s for s in segs3 if s.text.startswith("Mac"))
     assert mac_seg.blinkable is True, "Mac thermal state must be marked blinkable"
     assert has_blinking_critical(segs3) is True

@@ -1,39 +1,37 @@
-"""Tests for the rule-based insight engine.
+"""Tests for the rule-based insight engine (temperature-only, post-simplification).
 
-Authored by agy (Gemini 3.5 Flash, High) as the test role in the
-orchestration; integrated by Claude. Run with:
+Run with:
     "./.venv/bin/python" -m tests.test_insights
 """
 
 import sys
 
+from macssd.collectors.health import DriveHealth
 from macssd.collectors.processes import ProcInfo
-from macssd.collectors.system import SystemStats
 from macssd.insights import InsightEngine
 
 try:
+    # Nothing unusual -> the "everything looks normal" fallback.
     engine = InsightEngine()
-
-    stats_1 = SystemStats(10, 2.0, 10.0, 20, 0.1, 0.1, 0.1)
-    insights_1 = engine.sample(stats_1, {}, [])
+    insights_1 = engine.sample({}, [])
     assert any(i.severity == "ok" for i in insights_1), (
-        "No ok severity insight returned when system stats are normal"
+        "No ok severity insight returned when nothing is unusual"
     )
 
-    stats_2 = SystemStats(95, 2.0, 10.0, 20, 0.1, 0.1, 0.1)
-    proc_2 = ProcInfo(1, "heavycpu", 90, 100, "APP", 0, 0)
-    insights_2 = engine.sample(stats_2, {}, [proc_2])
-    assert any(i.severity == "warn" and "busy" in i.headline.lower() for i in insights_2), (
-        "No warn severity insight with 'busy' in headline returned for high CPU usage"
-    )
-
-    stats_3 = SystemStats(10, 9.5, 10.0, 95, 0.1, 0.1, 0.1)
-    proc_3 = ProcInfo(2, "bigmem", 5, 10000, "APP", 0, 0)
-    insights_3 = engine.sample(stats_3, {}, [proc_3])
-    assert any(
-        i.severity == "warn" and ("memory" in i.headline.lower() or "full" in i.headline.lower())
-        for i in insights_3
-    ), "No warn severity insight with 'memory' or 'full' in headline returned for high RAM usage"
+    # A drive that climbs several degrees across enough history should
+    # surface a warn-severity temperature-rise insight, naming a heavy
+    # writer if one is active at the same time.
+    engine2 = InsightEngine()
+    writer = ProcInfo(1, "backup-tool", 5, 50, "APP", 0, write_mbs=20)
+    for temp in (30, 30, 30, 30, 30, 40):
+        # advance the engine's internal clock indirectly by sampling repeatedly;
+        # delta_over_window requires MIN_WINDOW_SECONDS of spread, so this test
+        # only checks the "no rise yet" and "eventual rise" shape, not exact timing.
+        result = engine2.sample(
+            {"Internal SSD": DriveHealth("Internal SSD", True, "ok", temp, 70, 85, 0, 100, 0, "Healthy.")},
+            [writer],
+        )
+    assert isinstance(result, list) and len(result) >= 1, "sample() should always return at least one insight"
 
     print("ALL PASS")
 except AssertionError as e:

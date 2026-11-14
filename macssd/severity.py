@@ -1,39 +1,26 @@
-"""Shared severity thresholds for CPU, RAM, storage, and thermal readings.
+"""Shared thermal severity mapping.
 
 Used by both the live menu bar (checking a fresh value every few seconds)
-and the hourly background watcher (checking a single snapshot) — a single
+and the periodic background watcher (checking a single snapshot) — a single
 source of truth so the two never quietly disagree about what counts as a
 problem.
 """
 
 from __future__ import annotations
 
-
-def cpu_severity(pct: float) -> str:
-    if pct >= 85:
-        return "critical"
-    if pct >= 60:
-        return "warn"
-    return "ok"
-
-
-def ram_severity(pct: float) -> str:
-    if pct >= 80:
-        return "critical"
-    if pct >= 60:
-        return "warn"
-    return "ok"
-
-
-def storage_severity(used_gb: float, total_gb: float) -> str:
-    if total_gb <= 0:
-        return "neutral"
-    pct = used_gb / total_gb * 100
-    if pct >= 90:
-        return "critical"
-    if pct >= 80:
-        return "warn"
-    return "ok"
-
-
 THERMAL_SEVERITY = {"nominal": "ok", "fair": "ok", "serious": "warn", "critical": "critical"}
+
+# Apple Silicon CPU die temperature (from macmon), independent of Apple's own
+# nominal/fair/serious/critical thermal-pressure signal above.
+CPU_TEMP_WARN_C = 85.0
+CPU_TEMP_CRIT_C = 95.0
+
+
+def cpu_temp_severity(temp_c: float | None) -> str:
+    if temp_c is None:
+        return "unknown"
+    if temp_c >= CPU_TEMP_CRIT_C:
+        return "critical"
+    if temp_c >= CPU_TEMP_WARN_C:
+        return "warn"
+    return "ok"

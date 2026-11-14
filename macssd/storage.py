@@ -10,7 +10,7 @@ from pathlib import Path
 
 import psutil
 
-from macssd.collectors.disk import DRIVES
+from macssd.collectors.disk import discover_drives
 
 _PROJECT_DIR = Path(__file__).resolve().parent.parent
 _LAUNCH_AGENT_LABEL = "com.macssd.menubar"
@@ -27,7 +27,11 @@ class StorageUsage:
 def read_storage() -> dict[str, StorageUsage]:
     """Used/total GB per drive."""
     result = {}
-    for name, mountpoint in DRIVES:
+    for drive in discover_drives():
+        name, mountpoint = drive.name, drive.mountpoint
+        if mountpoint is None:
+            result[name] = StorageUsage(False)
+            continue
         try:
             usage = psutil.disk_usage(mountpoint)
             result[name] = StorageUsage(
