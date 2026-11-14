@@ -10,7 +10,11 @@ Two layers, so the logic is testable without a screen:
 
 Layout, left to right (vertical bars fill from the bottom):
 
-    USED 176.89 GB  (ring)  FREE 317.44 GB   R|#| 63%   C|#| 30%
+    USED 176.89 GB  (ring)  FREE 317.44 GB   RAM |#| 63%   CPU |#| 30%
+
+Each metric has its own gradient colour (disk purple-pink, RAM green-teal,
+CPU blue-cyan). Only a *critical* reading turns red, and it blinks (the app
+alternates ``blink_off``); warn-level readings keep their normal colour.
 """
 
 from __future__ import annotations
@@ -79,6 +83,10 @@ class CompactModel:
     ram: BarMetric
     ssd: RingMetric
 
+    @property
+    def has_critical(self) -> bool:
+        return "critical" in (self.cpu.severity, self.ram.severity, self.ssd.severity)
+
 
 def _clamp_percent(value: float) -> float:
     return min(max(float(value), 0.0), 100.0)
@@ -112,33 +120,42 @@ def build_compact_model(
 
 # --- drawing -----------------------------------------------------------------
 
-IMAGE_HEIGHT = 18.0
-_RING_SIZE = 14.0
-_RING_LINE = 2.6
-_BAR_W = 6.0
-_BAR_H = 16.0
-_CAPTION_SIZE = 6.0
-_VALUE_SIZE = 9.5
+IMAGE_HEIGHT = 22.0
+_RING_SIZE = 17.0
+_RING_LINE = 3.4
+_BAR_W = 8.0
+_BAR_H = 19.0
+_LABEL_SIZE = 10.5
+_VALUE_SIZE = 12.0
+_UNIT_SIZE = 9.5
 _GAP = 8.0
-_SMALL_GAP = 3.0
+_SMALL_GAP = 4.0
+
+# (start, end) RGB per metric. Chosen to read on both light and dark menu bars.
+GRADIENTS = {
+    "disk": ((0.62, 0.42, 1.00), (1.00, 0.42, 0.72)),   # purple -> pink
+    "ram": ((0.16, 0.85, 0.46), (0.10, 0.72, 0.85)),    # green -> teal
+    "cpu": ((0.22, 0.52, 1.00), (0.34, 0.86, 1.00)),    # blue -> cyan
+}
+
+
+def _rgb(c):
+    from AppKit import NSColor
+
+    return NSColor.colorWithSRGBRed_green_blue_alpha_(c[0], c[1], c[2], 1.0)
+
+
+def _lerp(a, b, t):
+    return tuple(a[i] + (b[i] - a[i]) * t for i in range(3))
 
 
 def _fonts():
-    from AppKit import NSFont, NSFontWeightBold, NSFontWeightMedium
+    from AppKit import NSFont, NSFontWeightBold, NSFontWeightMedium, NSFontWeightSemibold
 
-    caption = NSFont.systemFontOfSize_weight_(_CAPTION_SIZE, NSFontWeightBold)
-    value = NSFont.monospacedDigitSystemFontOfSize_weight_(_VALUE_SIZE, NSFontWeightMedium)
-    return caption, value
-
-
-def _fill_color(severity: str):
-    from AppKit import NSColor
-
-    if severity == "critical":
-        return NSColor.systemRedColor()
-    if severity == "warn":
-        return NSColor.systemOrangeColor()
-    return NSColor.labelColor()
+    label = NSFont.systemFontOfSize_weight_(_LABEL_SIZE, NSFontWeightBold)
+    value = NSFont.monospacedDigitSystemFontOfSize_weight_(_VALUE_SIZE, NSFontWeightSemibold)
+    unit = NSFont.systemFontOfSize_weight_(_UNIT_SIZE, NSFontWeightMedium)
+    return label, value, unit
 
 
 def _attr(text: str, font, color):
@@ -150,70 +167,78 @@ def _attr(text: str, font, color):
     )
 
 
-def _text_w(text: str, font) -> float:
+def _w(text: str, font) -> float:
     from AppKit import NSColor
 
     return _attr(text, font, NSColor.labelColor()).size().width
 
 
+def _split_gb(text: str) -> tuple[str, str]:
+    """'176.89 GB' -> ('176.89', 'GB')."""
+    number, _, unit = text.partition(" ")
+    return number, unit
+
+
+def _y_for(attr) -> float:
+    return (IMAGE_HEIGHT - attr.size().height) / 2
+
+
 def layout(model: CompactModel) -> dict[str, float]:
     """x positions and total width, measured with the real fonts."""
-    caption, value = _fonts()
+    label, value, unit = _fonts()
     pos: dict[str, float] = {}
     x = 1.0
+
+    def gb_width(text: str, with_unit: bool = True) -> float:
+        n, u = _split_gb(text)
+        return _w(n, value) + ((2.0 + _w(u, unit)) if with_unit else 0.0)
+
     pos["used_x"] = x
-    x += max(_text_w(model.ssd.used_text, value), _text_w("USED", caption)) + _SMALL_GAP + 1
+    x += _w("USED", label) + _SMALL_GAP
+    pos["used_val_x"] = x
+    x += gb_width(model.ssd.used_text, False) + _SMALL_GAP + 1
     pos["ring_x"] = x
     x += _RING_SIZE + _SMALL_GAP + 1
     pos["free_x"] = x
-    x += max(_text_w(model.ssd.free_text, value), _text_w("FREE", caption)) + _GAP
-    for key, metric in (("ram", model.ram), ("cpu", model.cpu)):
+    x += _w("FREE", label) + _SMALL_GAP
+    pos["free_val_x"] = x
+    x += gb_width(model.ssd.free_text) + _GAP
+    for key in ("ram", "cpu"):
         pos[f"{key}_x"] = x
-        x += _text_w("W", caption) + _SMALL_GAP          # stacked letters
-        x += _BAR_W + _SMALL_GAP                          # vertical bar
-        x += _text_w("100%", value) + _GAP                # percentage (widest case)
+        x += _w("RAM", label) + _SMALL_GAP
+        pos[f"{key}_bar_x"] = x
+        x += _BAR_W + _SMALL_GAP
+        pos[f"{key}_val_x"] = x
+        x += _w("99%", value) + _GAP
     pos["width"] = x - _GAP + 1
     return pos
 
 
-def _draw_caption_value(x: float, caption: str, text: str) -> None:
+def _metric_colors(key: str, severity: str, blink_off: bool):
+    """(start, end) colours for a metric; red only when critical and 'on'."""
     from AppKit import NSColor
 
-    cap_font, val_font = _fonts()
-    _attr(caption, cap_font, NSColor.secondaryLabelColor()).drawAtPoint_((x, IMAGE_HEIGHT - 6.5))
-    _attr(text, val_font, NSColor.labelColor()).drawAtPoint_((x, 0.5))
+    if severity == "critical" and not blink_off:
+        red = NSColor.systemRedColor()
+        return red, red
+    start, end = GRADIENTS[key]
+    return _rgb(start), _rgb(end)
 
 
-def _draw_vertical_block(x: float, metric: BarMetric) -> None:
-    from AppKit import NSBezierPath, NSColor
-    from Foundation import NSMakeRect
-
-    cap_font, val_font = _fonts()
-    letters = metric.label
-    line_h = 5.2
-    top = IMAGE_HEIGHT / 2 + line_h * len(letters) / 2
-    for i, ch in enumerate(letters):  # stacked label: R / A / M
-        _attr(ch, cap_font, NSColor.secondaryLabelColor()).drawAtPoint_((x, top - line_h * (i + 1) - 0.5))
-
-    bar_x = x + _text_w("W", cap_font) + _SMALL_GAP
-    bar_y = (IMAGE_HEIGHT - _BAR_H) / 2
-    NSColor.labelColor().colorWithAlphaComponent_(0.22).setFill()
-    NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-        NSMakeRect(bar_x, bar_y, _BAR_W, _BAR_H), 2.0, 2.0
-    ).fill()
-    fill_h = _BAR_H * metric.fraction
-    if fill_h > 0:
-        fill_h = max(fill_h, _BAR_W)  # keep the capsule shape for tiny values
-        _fill_color(metric.severity).setFill()
-        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            NSMakeRect(bar_x, bar_y, _BAR_W, fill_h), 2.0, 2.0
-        ).fill()
-
-    text = _attr(metric.text, val_font, _fill_color(metric.severity))
-    text.drawAtPoint_((bar_x + _BAR_W + _SMALL_GAP, (IMAGE_HEIGHT - text.size().height) / 2))
+def _draw_text(x: float, text: str, font, color) -> None:
+    a = _attr(text, font, color)
+    a.drawAtPoint_((x, _y_for(a)))
 
 
-def _draw_ring(x: float, ssd: RingMetric) -> None:
+def _draw_gb(x: float, text: str, color, with_unit: bool = True) -> None:
+    _, value, unit = _fonts()
+    number, u = _split_gb(text)
+    _draw_text(x, number, value, color)
+    if with_unit:
+        _draw_text(x + _w(number, value) + 2.0, u, unit, color)
+
+
+def _draw_ring(x: float, ssd: RingMetric, blink_off: bool) -> None:
     from AppKit import NSBezierPath, NSColor
     from Foundation import NSMakePoint
 
@@ -226,33 +251,72 @@ def _draw_ring(x: float, ssd: RingMetric) -> None:
     NSColor.labelColor().colorWithAlphaComponent_(0.22).setStroke()
     track.stroke()
 
-    if ssd.available and ssd.fraction > 0:
-        arc = NSBezierPath.bezierPath()
-        start = 90.0
-        end = start - 360.0 * ssd.fraction  # clockwise from 12 o'clock = share used
-        arc.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
-            centre, radius, start, end, True
+    if not (ssd.available and ssd.fraction > 0):
+        return
+    sweep = 360.0 * ssd.fraction  # clockwise from 12 o'clock = share used
+    start_c, end_c = GRADIENTS["disk"]
+    critical = ssd.severity == "critical" and not blink_off
+    steps = max(int(sweep / 6), 2)  # short arcs, each its own gradient colour
+    for i in range(steps):
+        a0 = 90.0 - sweep * i / steps
+        a1 = 90.0 - sweep * (i + 1) / steps
+        seg = NSBezierPath.bezierPath()
+        seg.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
+            centre, radius, a0 + (0.0 if i == 0 else 0.6), a1, True
         )
-        arc.setLineWidth_(_RING_LINE)
-        arc.setLineCapStyle_(1)  # round
-        _fill_color(ssd.severity).setStroke()
-        arc.stroke()
+        seg.setLineWidth_(_RING_LINE)
+        seg.setLineCapStyle_(1 if i in (0, steps - 1) else 0)
+        (NSColor.systemRedColor() if critical else _rgb(_lerp(start_c, end_c, i / (steps - 1)))).setStroke()
+        seg.stroke()
 
 
-def render_image(model: CompactModel):
-    """Draw the model into a non-template NSImage (dynamic colours)."""
+def _draw_bar_block(x: float, bar_x: float, val_x: float, key: str, metric: BarMetric, blink_off: bool) -> None:
+    from AppKit import NSBezierPath, NSColor, NSGradient
+    from Foundation import NSMakeRect
+
+    label, value, _ = _fonts()
+    c0, c1 = _metric_colors(key, metric.severity, blink_off)
+    _draw_text(x, metric.label, label, c0)
+
+    bar_y = (IMAGE_HEIGHT - _BAR_H) / 2
+    NSColor.labelColor().colorWithAlphaComponent_(0.22).setFill()
+    NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+        NSMakeRect(bar_x, bar_y, _BAR_W, _BAR_H), 3.0, 3.0
+    ).fill()
+    fill_h = _BAR_H * metric.fraction
+    if fill_h > 0:
+        fill_h = max(fill_h, _BAR_W)  # keep the capsule shape for tiny values
+        path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(bar_x, bar_y, _BAR_W, fill_h), 3.0, 3.0
+        )
+        NSGradient.alloc().initWithStartingColor_endingColor_(c0, c1).drawInBezierPath_angle_(path, 90.0)
+
+    text_color = c0 if metric.severity == "critical" and not blink_off else NSColor.labelColor()
+    _draw_text(val_x, metric.text, value, text_color)
+
+
+def render_image(model: CompactModel, blink_off: bool = False):
+    """Draw the model into a non-template NSImage (dynamic colours).
+
+    ``blink_off`` is the "off" half of the critical blink: critical metrics
+    briefly fall back to their normal gradient instead of red.
+    """
     from AppKit import NSImage
     from Foundation import NSMakeSize
 
     pos = layout(model)
+    label, _, _ = _fonts()
 
     def handler(_rect) -> bool:
         try:
-            _draw_caption_value(pos["used_x"], "USED", model.ssd.used_text)
-            _draw_ring(pos["ring_x"], model.ssd)
-            _draw_caption_value(pos["free_x"], "FREE", model.ssd.free_text)
-            _draw_vertical_block(pos["ram_x"], model.ram)
-            _draw_vertical_block(pos["cpu_x"], model.cpu)
+            c_disk0, _c = _metric_colors("disk", model.ssd.severity, blink_off)
+            _draw_text(pos["used_x"], "USED", label, c_disk0)
+            _draw_gb(pos["used_val_x"], model.ssd.used_text, _label_color(), with_unit=False)
+            _draw_ring(pos["ring_x"], model.ssd, blink_off)
+            _draw_text(pos["free_x"], "FREE", label, c_disk0)
+            _draw_gb(pos["free_val_x"], model.ssd.free_text, _label_color())
+            _draw_bar_block(pos["ram_x"], pos["ram_bar_x"], pos["ram_val_x"], "ram", model.ram, blink_off)
+            _draw_bar_block(pos["cpu_x"], pos["cpu_bar_x"], pos["cpu_val_x"], "cpu", model.cpu, blink_off)
         except Exception:  # noqa: BLE001 - never let a draw failure crash the menu bar
             return False
         return True
@@ -264,12 +328,18 @@ def render_image(model: CompactModel):
     return image
 
 
-def render_bitmap(model: CompactModel, scale: int = 2):
+def _label_color():
+    from AppKit import NSColor
+
+    return NSColor.labelColor()
+
+
+def render_bitmap(model: CompactModel, scale: int = 2, blink_off: bool = False):
     """Rasterise the status image to an NSBitmapImageRep (for tests/screenshots)."""
     from AppKit import NSBitmapImageRep, NSGraphicsContext
     from Foundation import NSMakeRect
 
-    image = render_image(model)
+    image = render_image(model, blink_off)
     size = image.size()
     px_w, px_h = int(size.width * scale), int(size.height * scale)
     rep = NSBitmapImageRep.alloc().initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(

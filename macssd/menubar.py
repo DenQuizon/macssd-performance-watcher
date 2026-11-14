@@ -338,9 +338,9 @@ class MenuBarApp(rumps.App):
         threading.Thread(target=work, daemon=True).start()
 
     def blink(self, _sender=None) -> None:
-        """Flash temperature segments on/off when critical; a no-op otherwise.
-        CPU/RAM/storage never blink, even when critical — they stay solid red."""
-        if not has_blinking_critical(self._last_segments):
+        """Flash critical readings on/off (temperatures, and CPU/RAM/storage usage
+        turning red); a no-op when nothing is critical."""
+        if not (has_blinking_critical(self._last_segments) or self._model.has_critical):
             return
         self._blink_on = not self._blink_on
         self._apply_title()
@@ -349,7 +349,7 @@ class MenuBarApp(rumps.App):
         try:
             item = self._nsapp.nsstatusitem
             button = item.button()
-            button.setImage_(menubar_render.render_image(self._model))
+            button.setImage_(menubar_render.render_image(self._model, blink_off=not self._blink_on))
             button.setImagePosition_(2)  # NSImageLeft: graphics first, temps after
             attr = _attributed_title(self._compact_segments, blink_off=not self._blink_on)
             item.setAttributedTitle_(attr)

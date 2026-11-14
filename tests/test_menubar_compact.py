@@ -68,8 +68,8 @@ try:
 
     # Drawing: layout is sane and the bitmap actually has ink in all three blocks.
     pos = r.layout(m)
-    assert pos["used_x"] < pos["ring_x"] < pos["free_x"] < pos["ram_x"] < pos["cpu_x"] < pos["width"]
-    assert pos["width"] < 260, f"menu bar graphic too wide: {pos['width']}"
+    assert pos["used_x"] < pos["ring_x"] < pos["free_x"] < pos["free_val_x"] < pos["ram_x"] < pos["cpu_x"] < pos["width"]
+    assert pos["width"] < 360, f"menu bar graphic too wide: {pos['width']}"
     rep = r.render_bitmap(m)
     w, h = rep.pixelsWide(), rep.pixelsHigh()
     assert (w, h) == (int(pos["width"] * 2), int(r.IMAGE_HEIGHT * 2))
@@ -83,10 +83,32 @@ try:
         return count
 
     assert ink(pos["used_x"], pos["ring_x"]) > 40, "USED text is blank"
+    assert pos["used_x"] < pos["used_val_x"] < pos["ring_x"], "USED label must sit left of its number"
     assert ink(pos["ring_x"], pos["free_x"]) > 40, "ring is blank"
     assert ink(pos["free_x"], pos["ram_x"]) > 40, "FREE text is blank"
     assert ink(pos["ram_x"], pos["cpu_x"]) > 40, "RAM block is blank"
     assert ink(pos["cpu_x"], pos["width"]) > 40, "CPU block is blank"
+
+    # Critical blink: red when 'on', normal gradient when 'off'; non-critical never red.
+    hot = r.build_compact_model(SystemStats(10.0, 1, 1, 97.0, 0, 0, 0), storage)
+    assert hot.ram.severity == "critical" and hot.has_critical
+    assert not r.build_compact_model(stats, {}).has_critical or False
+    on, off = r.render_bitmap(hot), r.render_bitmap(hot, blink_off=True)
+
+    def reddish(rep, x0, x1):
+        n = 0
+        for x in range(int(x0 * 2), min(int(x1 * 2), rep.pixelsWide())):
+            for y in range(rep.pixelsHigh()):
+                c = rep.colorAtX_y_(x, y)
+                if c.alphaComponent() > 0.5 and c.redComponent() > 0.8 and c.greenComponent() < 0.4 and c.blueComponent() < 0.4:
+                    n += 1
+        return n
+
+    hp = r.layout(hot)
+    assert reddish(on, hp["ram_x"], hp["cpu_x"]) > 20, "critical RAM should be red"
+    assert reddish(off, hp["ram_x"], hp["cpu_x"]) == 0, "blink-off frame must not be red"
+    calm = r.render_bitmap(r.build_compact_model(SystemStats(10.0, 1, 1, 50.0, 0, 0, 0), {}))
+    assert reddish(calm, 0, hp["width"]) == 0, "normal readings must not be red"
 
     print("ALL PASS")
 except (AssertionError, StopIteration) as e:
