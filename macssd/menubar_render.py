@@ -13,7 +13,7 @@ Layout, left to right (vertical bars fill from the bottom):
     USED 176.89 GB  (ring)  FREE 317.44 GB   RAM |#| 63%   CPU |#| 30%
 
 Each metric has its own gradient colour (disk purple-pink, RAM green-teal,
-CPU blue-cyan). Only a *critical* reading turns red, and it blinks (the app
+CPU amber-orange). Only a *critical* reading turns red, and it blinks (the app
 alternates ``blink_off``); warn-level readings keep their normal colour.
 """
 
@@ -135,7 +135,7 @@ _SMALL_GAP = 4.0
 GRADIENTS = {
     "disk": ((0.62, 0.42, 1.00), (1.00, 0.42, 0.72)),   # purple -> pink
     "ram": ((0.16, 0.85, 0.46), (0.10, 0.72, 0.85)),    # green -> teal
-    "cpu": ((0.22, 0.52, 1.00), (0.34, 0.86, 1.00)),    # blue -> cyan
+    "cpu": ((1.00, 0.80, 0.05), (1.00, 0.52, 0.08)),    # amber -> orange
 }
 
 
